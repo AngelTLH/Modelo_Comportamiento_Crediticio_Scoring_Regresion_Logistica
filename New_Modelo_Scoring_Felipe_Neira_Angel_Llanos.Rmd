@@ -1,0 +1,3145 @@
+---
+title: "Modelo Predictivo Scoring"
+author: "Felipe Neira Rojas & Angel Llanos Herrera"
+date: "23-10-2025"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    code_folding: hide
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,   # muestra el código (ponlo en FALSE si no quieres mostrarlo)
+  warning = FALSE,  # oculta warnings
+  message = FALSE,  # oculta mensajes (p. ej., de carga de paquetes)
+  comment = NA      # quita el prefijo "##" en la salida
+)
+
+```
+
+# **Cargar base de datos**
+
+Se carga la base de datos de Scoring, el cual posee el siguiente diccionario de variables:
+
+```{r}
+library(tibble)
+
+diccionario <- tribble(
+  ~Variable,      ~Descripcion,
+  "ID CLIENTE",   "Número identificador del cliente",
+  "RENTA",        "Renta mensual promedio del cliente",
+  "COMPORTAMIENTO","Evaluación del comportamiento del cliente. MALO: si tiene deuda morosa, vencida o castigada durante la ventana de desempeño. BUENO: en caso contrario.",
+  "SEXO",         "Sexo del cliente: 1 = Femenino, 0 = Masculino.",
+  "EDAD",         "Edad en años del cliente.",
+  "TIPO_NAC",     "Tipo de nacionalidad del cliente.",
+  "EST_CIVIL",    "Estado civil del cliente",
+  "GSE",          "Nivel socioeconómico del cliente",
+  "NCC",          "Número de relaciones de cuentas corrientes",
+  "VER_TRA",      "Verificación de trabajo en los últimos 2 años",
+  "AVALUO",       "Avalúo de bienes raíces.",
+  "NDIR",         "Número de direcciones del cliente",
+  "VER_DOM",      "Verificación de domicilio en los últimos 2 años",
+  "NACR",         "Número de acreedores último mes",
+  "LINEACRNU",    "Línea de crédito no utilizada en el último mes",
+  "DDA_HIPOT",    "Deuda hipotecaria último mes",
+  "NUM_VIG_12",   "Número de meses en los últimos 12 meses con deuda vigente",
+  "NUM_MOR_12",   "Número de meses en los últimos 12 meses con deuda morosa",
+  "VC_CAS",       "Indicador de 1+ meses en los últimos 12 meses con deuda vencida o castigada",
+  "MAXUTIL",      "Indicador de máxima utilización de LC",
+  "RPXLCNU",      "Relación de línea de crédito no utilizada prom. a máx.",
+  "RPXDCOM",      "Relación de deuda comercial prom. a máx.",
+  "RPXDCON",      "Relación de deuda de consumo prom. a máx.",
+  "IND_IF",       "Indicador del IF en los últimos 6 meses",
+  "IND_BC",       "Indicador del BC en los últimos 6 meses",
+  "TMOT_06",      "Monto total (en U.F.) en IF en los últimos 6 meses",
+  "TDOC",         "Total de documentos en el BC",
+  "TMOT_12",      "Monto total (en U.F.) en IF en los últimos 12 meses",
+  "NTCRED",       "Número de tarjetas de crédito en los últimos 6 meses"
+)
+
+# Visualizar
+diccionario
+
+
+```
+
+```{r}
+library(readxl)
+#scoring <- read_excel("C:/Users/angel/Desktop/Econometria Scoring/data/Scoring.xlsx")
+scoring <- read_excel("C:/Users/Hp/Downloads/Actividad1.xlsx")
+```
+
+Revisamos que se haya cargado correctamente.
+
+```{r}
+head(scoring)
+```
+
+Revisamos la estructura de los datos.
+
+```{r}
+str(scoring)
+```
+
+Al haber comprobado que se haya cargado, eliminamos algunas observaciones aleatoriamente, según la cantidad solicitada.
+
+```{r}
+set.seed(777)
+# Generar 100 índices de fila aleatorios
+indices_a_eliminar <- sample(1:nrow(scoring), 100)
+
+# Crear un nuevo data.frame (df_nuevo) sin las filas de los índices seleccionados
+scoring <- scoring[-indices_a_eliminar, ]
+
+# Verificar la dimensión del nuevo data.frame
+dim(scoring)
+scoring<-scoring[,-1]
+```
+
+Se eliminan las siguientes 100 observaciones.
+
+```{r}
+indices_a_eliminar
+```
+
+
+El nuevo dataframe resultó con 21.420 observaciones en 29 variables.
+
+# **Calidad de los datos**
+
+## **Exploración y Definición de variables**
+
+Primero, se revisará la definició de las variables y si se detectan valores nulos (faltantes) en cada una de estas.
+
+```{r}
+
+# ============================================
+# Resumen de variables (semántica: numérica/categórica/fecha/binaria, etc.)
+# ============================================
+
+resumen_vars <- function(df, max_char = 60,
+                         thresh_text_as_cat = 50,   # máx. niveles para tratar texto como categórica
+                         thresh_text_ratio  = 0.30, # o hasta 30% de n como tope de niveles
+                         thresh_discrete_levels = 20 # umbral para considerar numérica "discreta"
+                         ) {
+  stopifnot(is.data.frame(df))
+  n_total <- nrow(df)
+  vars <- names(df)
+
+  get_tipo <- function(x) paste(class(x), collapse = ",")
+  get_ejemplo <- function(x) {
+    if (is.list(x)) return("<lista>")
+    idx <- which(!is.na(x))
+    if (length(idx) == 0) return(NA_character_)
+    v <- as.character(x[idx[1]])
+    ifelse(nchar(v) > max_char, paste0(substr(v, 1, max_char), "…"), v)
+  }
+  is_integerish <- function(x) {
+    y <- x[!is.na(x)]
+    if (!length(y)) return(FALSE)
+    max(abs(y - round(y))) < 1e-8
+  }
+  infer_semantica <- function(x) {
+    if (inherits(x, "POSIXct") || inherits(x, "POSIXlt")) return("Fecha-hora")
+    if (inherits(x, "Date")) return("Fecha")
+    if (is.logical(x)) return("Lógica (TRUE/FALSE)")
+    if (is.factor(x)) return(if (is.ordered(x)) "Categórica ordinal" else "Categórica nominal")
+    if (is.character(x)) {
+      nu <- length(unique(x[!is.na(x)]))
+      tope <- min(thresh_text_as_cat, floor(thresh_text_ratio * n_total))
+      return(if (nu <= tope) "Categórica nominal (texto)" else "Texto libre")
+    }
+    if (is.numeric(x)) {
+      ux <- unique(x[!is.na(x)])
+      if (!length(ux)) return("Numérica (vacía)")
+      if (all(ux %in% c(0, 1))) return("Binaria (0/1)")
+      if (is.integer(x) || is_integerish(x)) {
+        return(if (length(ux) <= thresh_discrete_levels) "Numérica discreta (conteo)" else "Numérica continua")
+      }
+      return("Numérica continua")
+    }
+    if (is.list(x)) return("Lista/estructura")
+    "Otro"
+  }
+  n_niveles_if_cat <- function(x) {
+    if (is.factor(x)) return(nlevels(x))
+    if (is.character(x)) return(length(unique(x[!is.na(x)])))
+    NA_integer_
+  }
+
+  datos <- lapply(vars, function(v) {
+    x <- df[[v]]
+    n_no_na   <- sum(!is.na(x))
+    pct_miss  <- round(100 * (1 - n_no_na / n_total), 2)
+    n_unicos  <- length(unique(x[!is.na(x)]))
+    list(
+      variable      = v,
+      ejemplo       = get_ejemplo(x),
+      definicion    = infer_semantica(x),   # <-- semántica solicitada
+      tipo_clase    = get_tipo(x),          # clase R subyacente (factor/double/character/…)
+      n_no_nulas    = n_no_na,
+      pct_faltantes = pct_miss,
+      n_unicos      = n_unicos,
+      n_niveles     = n_niveles_if_cat(x)
+    )
+  })
+
+  out <- do.call(rbind.data.frame, datos)
+  rownames(out) <- NULL
+  out <- out[, c("variable","ejemplo","definicion","tipo_clase",
+                 "n_no_nulas","pct_faltantes","n_unicos","n_niveles")]
+  # Orden sugerido: más faltantes primero
+  out[order(-out$pct_faltantes, out$variable), ]
+}
+
+# -----------------------
+# Uso con tu base `scoring`
+# -----------------------
+tabla_scoring <- resumen_vars(scoring)
+print(tabla_scoring, row.names = FALSE)
+
+
+
+```
+
+Se logra ver que todas están bien definidas y no se detectan valores faltantes según la codificación e ingreso de datos. Sin embargo, podemos notar que en la variable que refiere al nivel socioeconómico existe una categoría llamada NA. Por lo tanto, se revisará cada categoría de las variales para considerar errores de tabulación dentro de la base de datos, que puedan referir a datos faltantes.
+
+## **Valores faltantes**
+
+En base a lo planteado anteriormente, resultaron las siguientes categorías:
+
+```{r}
+
+# -----------------------------------------------------------
+# Tabla de variables CATEGÓRICAS: conteos y porcentajes
+# Texto simple con separadores y columnas alineadas
+# -----------------------------------------------------------
+
+print_tabla_categoricas <- function(df,
+                                    vars = NULL,        # vector opcional de columnas a evaluar
+                                    max_levels = 50,    # máximo de niveles para tratar como categórica si es character/integerish
+                                    include_na = FALSE, # si TRUE, incluye NA como categoría
+                                    ordenar = c("n","alpha","pct"), # criterio de orden de categorías
+                                    decreasing = TRUE) {
+
+  stopifnot(is.data.frame(df))
+  ordenar <- match.arg(ordenar)
+
+  # Helpers
+  is_integerish <- function(x) {
+    y <- x[!is.na(x)]
+    if (!length(y)) return(FALSE)
+    max(abs(y - round(y))) < 1e-8
+  }
+  es_cat <- function(x) {
+    if (is.factor(x) || is.logical(x)) return(TRUE)
+    if (is.character(x)) return(length(unique(x[!is.na(x)])) <= max_levels)
+    if (is.numeric(x) && is_integerish(x)) return(length(unique(x[!is.na(x)])) <= max_levels)
+    FALSE
+  }
+  sep_largo  <- paste(rep("-", 40), collapse = "")
+  sep_corto  <- paste(rep("-", 8),  collapse = "")
+
+  cols <- if (is.null(vars)) names(df) else vars
+  cols <- cols[cols %in% names(df)]
+
+  for (v in cols) {
+    x <- df[[v]]
+    if (!es_cat(x)) next
+
+    # Tabla de frecuencias
+    use_na <- if (include_na) "ifany" else "no"
+    tab <- table(x, useNA = use_na)        # vector nombrado
+    tot <- sum(tab)
+    if (tot == 0) next
+    pct <- 100 * (as.numeric(tab) / tot)
+
+    # Orden de categorías
+    ord <- switch(ordenar,
+                  n    = order(as.numeric(tab), decreasing = decreasing),
+                  pct  = order(pct, decreasing = decreasing),
+                  alpha= order(tolower(names(tab)), decreasing = decreasing))
+    tab <- tab[ord]
+    pct <- pct[ord]
+
+    # Anchos para alineación
+    labels <- names(tab)
+    w_lab  <- max(nchar(labels), nchar("categoria"))
+    w_n    <- max(nchar(as.character(tab)), nchar("conteo"))
+    # Encabezado
+    cat(sep_largo, "\n", sep = "")
+    cat(sprintf("*%s*  %-*s  %*s  %s\n",
+                v, w_lab, "*conteo*", w_n, "*pct*", ""))
+
+    # Filas
+    for (i in seq_along(tab)) {
+      cat(sprintf("- %-*s  %*d  %6.2f%%\n",
+                  w_lab, labels[i], w_n, as.integer(tab[i]), pct[i]))
+    }
+
+    # Pie y separador corto entre variables
+    cat(sep_corto, "\n\n", sep = "")
+  }
+}
+
+
+print_tabla_categoricas(scoring)
+
+
+```
+
+Podemos notar en la variable de nivel socioeconómico (GSE) la existencia de dos categorías que refieren a valores faltantes; NA con 13550 observaciones representando el 62.26% del total de datos. También, 1 registro nA, el cual también representa un valor faltante. Estas variables se redefinirán como valores perdidos.
+
+```{r}
+
+# -----------------------------
+# 1) Vista previa (antes)
+# -----------------------------
+cat("\n[ANTES] Distribución GSE (incluye NA reales y 'NA' como texto):\n")
+print(table(scoring$GSE, useNA = "ifany"))
+cat("\n[ANTES] Porcentajes:\n")
+print(round(100 * prop.table(table(scoring$GSE, useNA = "ifany")), 2))
+
+# -----------------------------
+# 2) Re-codificación de faltantes en GSE
+#    (convierte 'NA', 'nA', 'N/A', '', etc. a NA real)
+# -----------------------------
+recode_missing_tokens <- function(x, tokens = c("na","n/a","<na>","null","none",
+                                                "sin dato","sin datos","no informado",
+                                                "sd","s/d","","-",".")) {
+  was_factor <- is.factor(x)
+  x_chr <- as.character(x)
+  x_chr <- trimws(x_chr)
+  is_miss <- is.na(x_chr) | tolower(x_chr) %in% tokens
+  x_chr[is_miss] <- NA
+  if (was_factor) droplevels(factor(x_chr)) else x_chr
+}
+
+scoring$GSE <- recode_missing_tokens(scoring$GSE, tokens = c("na","n/a","<na>","nA"))
+
+# Nota: añadí 'na' y 'nA' explícitamente para capturar los casos que mencionaste.
+# Si quieres capturar más variantes, usa el vector largo por defecto de la función.
+
+# -----------------------------
+# 3) Vista después de recodificar
+# -----------------------------
+cat("\n[DESPUÉS] Distribución GSE (incluye NA reales):\n")
+print(table(scoring$GSE, useNA = "ifany"))
+cat("\n[DESPUÉS] Porcentajes:\n")
+print(round(100 * prop.table(table(scoring$GSE, useNA = "ifany")), 2))
+
+
+```
+
+Ahora será necesario revisar el tratamiento de estos valores faltantes. Cabe mencionar que plantear la “imputación” y estimación de estas categorías de GSE dentro del contexto no es del todo válido, porque GSE corresponde a una clasificación estandarizada. Por ejemplo, el estándar vigente de AIM Chile establece que el GSE se calcula a partir de un índice socioeconómico construido con tres insumos específicos del hogar: (i) ingreso per cápita equivalente (que ajusta el ingreso por tamaño del hogar con una escala $n^{0.7}$), (ii) nivel educativo del principal sostenedor y (iii) ocupación del principal sostenedor. Además, el modelo se calibra con datos de CASEN y de la Encuesta de Presupuestos Familiares (EPF). En el contexto de la base de datos de scoring, estas variables no se encuentran presentes (tamaño del hogar, educación u ocupación del sostenedor), siendo complicado asignar GSE de forma generalizable (AIM Chile, 2024).
+
+En 2018 se realizó una actualización de GSE, en la que, antes de esta actualización, la educación y la ocupación eran los principales ejes; sin embargo, luego de 2018 dio paso a un modelo explícito basado en ingreso per cápita, educación y ocupación, con siete categorías y parámetros obtenidos de estadísticas públicas (CASEN y EPF). Este cambio se hizo para asegurar comparabilidad, transparencia y actualización. Intentar estimar la clasificación de GSE desde variables no contempladas en el modelo deja de ser GSE. Es por esta razón que líderes de la industria enfatizan que, con la actualización del GSE, se puede notar que no es linealmente comparable con la versión previa (GfK Chile, 2019).
+
+De todas formas, incluyendo variables que tengan sentido con las incluidas dentro del modelo original (a pesar de no ser las mismas), se comparará un modelo para ver sus resultados.
+
+## **Valores atípicos**
+
+Es importante revisar la cantidad de valores atípicos de las variables de manera univariada bajo el criterio de Tuckey.
+
+```{r}
+# ===== Solo si aún NO tienes 'tukey_outlier_summary' =====
+library(dplyr); library(purrr); library(tidyr)
+
+
+scoring_num <- scoring %>% select(where(is.numeric))
+
+tukey_outlier_summary <- imap_dfr(scoring_num, ~{
+  x <- .x; v <- .y; n <- sum(!is.na(x))
+  if (n == 0) return(tibble(variable=v,n=0,q1=NA,q3=NA,iqr=NA,
+                            lower_fence=NA,upper_fence=NA,
+                            n_low=NA,n_high=NA,n_out=NA,prop_out=NA))
+  q1 <- quantile(x,.25,na.rm=TRUE); q3 <- quantile(x,.75,na.rm=TRUE)
+  iqr <- q3-q1; lf <- q1-1.5*iqr; uf <- q3+1.5*iqr
+  n_low <- sum(x < lf,na.rm=TRUE); n_high <- sum(x > uf,na.rm=TRUE)
+  tibble(variable=v,n=n,q1=as.numeric(q1),q3=as.numeric(q3),iqr=as.numeric(iqr),
+         lower_fence=as.numeric(lf),upper_fence=as.numeric(uf),
+         n_low=n_low,n_high=n_high,n_out=n_low+n_high,
+         prop_out=(n_low+n_high)/n)
+}) %>% arrange(desc(n_out))
+
+
+# ===== Gráfico interactivo con Plotly =====
+library(plotly)
+library(dplyr)
+
+df_plot <- tukey_outlier_summary %>%
+  mutate(variable = reorder(variable, n_out))
+
+p <- plot_ly(
+  data = df_plot,
+  x = ~n_out, y = ~variable,
+  type = "bar", orientation = "h",
+  text = ~paste0(
+    "<b>", variable, "</b><br>",
+    "Atípicos: ", n_out, " (", scales::percent(prop_out, accuracy = 0.1), ")<br>",
+    "Q1: ", signif(q1,4), " | Q3: ", signif(q3,4), " | IQR: ", signif(iqr,4), "<br>",
+    "Cerca inf.: ", signif(lower_fence,4), " | sup.: ", signif(upper_fence,4)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Outliers univariados por variable (criterio de Tukey)",
+    xaxis = list(title = "Cantidad de atípicos"),
+    yaxis = list(title = "Variable"),
+    margin = list(l=120)
+  )
+
+p
+
+```
+
+Se detectan un gran numero de valores atípicos en la variable NUM_MOR_12, con 4108 (19.2%) casos atípicos. En la variable IND_IF se identificaron 4014 (18.7%), mientra que en RPXLCNU hay 3778 valores atípicos (17.6%). Estas son las 3 variables con mayor cantidad de comportamientos atípicos.
+
+# **Tratamiento de valores faltantes en grupo socioeconómico (GSE)**
+
+Habiendo visto que las variables que componen la categorización de GSE no se encuentran en la base de datos, y entendiendo que la única que más se acerca es RENTA, o bien, la renta mensual del cliente, esta sería la única variable que nos aportaría información valiosa para la clasificación. Sin embargo, se probará si existen diferencias y asociaciones importantes con otras variables.
+
+Luego de esto, se aplicará un modelo de regresión multilogística para validar el rendimiento de la imputación de valores faltantes en el grupo socioeconómico (GSE). Si este rendimiento es óptimo en la validación (> 70% de precisión en cada una de las categorías), se utilizaría para la imputación de estos valores. Además, en un estudio aplicado al credit scoring se compararon imputaciones por media/mediana versus KNN, concluyéndose que KNN preserva mejor las relaciones entre variables y mejora el rendimiento del modelo (Parveen & Thangaraju, 2024).
+
+## **Selección de variables**
+
+A continuación, a través de un diagrama de caja bivariado, buscaremos conocer posibles relaciones entre el GSE y diversas variables numéricas.
+
+```{r}
+# --- PASO 1: CARGAR LAS LIBRERÍAS ---
+library(plotly)
+library(dplyr)
+
+# --- PASO 2: SEPARAR LAS VARIABLES NUMÉRICAS Y CATEGÓRICAS ---
+# Usamos select_if() para una forma robusta de separar los datos.
+# Esto garantiza que los dataframes de entrada sean correctos.
+scoring_categoricas <- scoring %>%
+  select_if(~!is.numeric(.)) # Selecciona todo lo que NO sea numérico
+
+scoring_numericas <- scoring %>%
+  select_if(is.numeric)       # Selecciona solo lo numérico
+
+scoring_numericas <- scoring_numericas %>%
+  mutate(etario = case_when(
+    EDAD >= 17 & EDAD <= 29 ~ "17-29",
+    EDAD >= 30 & EDAD <= 40 ~ "30-40",
+    EDAD >= 41 & EDAD <= 49 ~ "41-49",
+    EDAD >= 50              ~ "50+",
+    TRUE ~ NA_character_     # Por si hay NA o valores fuera de rango
+  ))
+scoring_categoricas$etario <- scoring_numericas$etario
+
+
+scoring_numericas <- scoring %>%
+  select_if(is.numeric)       # Selecciona solo lo numérico
+
+
+# --- PASO 3: CREAR LOS BOTONES PARA CADA MENÚ ---
+# El menú para el Eje X (variables categóricas)
+botones_x <- lapply(names(scoring_categoricas), function(var_x) {
+  list(
+    method = "restyle",
+    label = var_x,
+    args = list(
+      # Atributos a actualizar: el eje X y el título del eje X
+      list(x = list(scoring_categoricas[[var_x]])),
+      list(xaxis = list(title = var_x))
+    )
+  )
+})
+
+# El menú para el Eje Y (variables numéricas)
+botones_y <- lapply(names(scoring_numericas), function(var_y) {
+  list(
+    method = "restyle",
+    label = var_y,
+    args = list(
+      # Atributos a actualizar: el eje Y y el título del eje Y
+      list(y = list(scoring_numericas[[var_y]])),
+      list(yaxis = list(title = var_y))
+    )
+  )
+})
+
+# --- PASO 4: CREAR EL GRÁFICO INICIAL Y AÑADIR LOS MENÚS ---
+# Usamos la primera variable de cada grupo para el gráfico por defecto.
+p <- plot_ly(
+  x = scoring_categoricas[[1]],
+  y = scoring_numericas[[1]],
+  type = "box"
+) %>%
+  layout(
+    title = "Boxplot Bivariado Interactivo",
+    xaxis = list(title = names(scoring_categoricas)[1]),
+    yaxis = list(title = names(scoring_numericas)[1]),
+
+    updatemenus = list(
+      # Menú para el Eje Y (Variables Numéricas)
+      list(
+        type = "dropdown",
+        buttons = botones_y,
+        x = 0.05,
+        y = 1.05
+      ),
+      # Menú para el Eje X (Variables Categóricas)
+      list(
+        type = "dropdown",
+        buttons = botones_x,
+        x = 0.25,
+        y = 1.05
+      )
+    )
+  )
+
+# --- PASO 5: MOSTRAR EL GRÁFICO ---
+p
+```
+
+Podemos notar que, al interesarnos en completar los datos de GSE, esta variable está asociada a diferentes rangos de renta y  avalúo, pero no hay una categoría de el nivel socioeconómico que se relacione directamente con alguna variable en especifico, ni que muestre tendencia. Es por esto, con los datos completos (omitiendo los NA), buscaremos esta relación con las demás variables.
+
+Ahora evaluaremos la relación entre las variables independientes categóricas y la variable dependiente “GSE”. Para ello, aplicaremos la prueba de chi-cuadrado de independencia y, en los casos donde encontremos una asociación significativa, utilizaremos la V de Cramér para medir la fuerza de dicha asociación.
+**Hipótesis de la prueba Chi-cuadrado:**
+
+-   H_0: No existe asociación entre la variable categórica y GSE; es decir, son independientes.
+
+-   H_1: Existe una asociación entre la variable categórica y GSE; es decir, no son independientes.
+
+Si se rechaza la hipótesis nula, concluiremos que hay una asociación estadísticamente significativa entre ambas variables.
+
+```{r}
+library(dplyr)
+
+# Vista previa (opcional)
+table(scoring$GSE, useNA = "ifany")
+
+# Unificar "NA"/"nA" (y variantes) a NA real
+scoring <- scoring %>%
+  mutate(
+    GSE = as.character(GSE),
+    GSE = ifelse(tolower(trimws(GSE)) %in% c("na"), NA, GSE),
+    GSE = factor(GSE)  # vuelve a factor si lo necesitas como categórica
+  )
+
+# Quitar niveles no usados (por si "na" quedó como nivel)
+scoring$GSE <- droplevels(scoring$GSE)
+
+
+# Versión robusta (excluye NA reales y también el string "NA"/"nA" si existiera)
+scoring_sin_na <- scoring %>%
+  filter(!is.na(GSE) & tolower(as.character(GSE)) != "na")
+
+# (Opcional) Limpia niveles vacíos en factores tras el filtrado
+scoring_sin_na <- scoring_sin_na %>%
+  mutate(across(where(is.factor), droplevels))
+
+```
+
+```{r}
+
+chi_cramer_simple <- function(df, gse_var = "GSE", alpha = 0.05,
+                              max_levels = 15, include_na = TRUE) {
+  stopifnot(gse_var %in% names(df))
+
+  # Heurística de categóricas: factor/character o numérica con pocos niveles
+  n_uniq <- function(x) length(unique(x[!is.na(x)]))
+  is_cat <- function(x) is.factor(x) || is.character(x) || (is.numeric(x) && n_uniq(x) <= max_levels)
+
+  cat_vars <- names(df)[vapply(df, is_cat, logical(1))]
+  cat_vars <- setdiff(cat_vars, gse_var)  # excluir GSE
+
+  results <- lapply(cat_vars, function(v) {
+    g <- df[[gse_var]]
+    x <- df[[v]]
+
+    if (!is.factor(g)) g <- as.factor(g)
+    if (!is.factor(x)) x <- as.factor(x)
+
+    useNA_opt <- if (include_na) "ifany" else "no"
+    tb <- table(g, x, useNA = useNA_opt)
+
+    # limpiar filas/columnas vacías
+    tb <- tb[rowSums(tb) > 0, , drop = FALSE]
+    tb <- tb[, colSums(tb) > 0, drop = FALSE]
+
+    if (nrow(tb) < 2 || ncol(tb) < 2) {
+      return(data.frame(variable = v, p_value = NA_real_, df = NA_real_, n = sum(tb),
+                        cramer_v = NA_real_, significant = FALSE, stringsAsFactors = FALSE))
+    }
+
+    ch <- suppressWarnings(chisq.test(tb))  # sin simulate.p.value
+    p  <- ch$p.value
+    n  <- sum(tb); r <- nrow(tb); c <- ncol(tb)
+
+    v_cramer <- if (!is.na(p) && p < alpha) {
+      sqrt(as.numeric(ch$statistic) / (n * (min(r - 1, c - 1))))
+    } else NA_real_
+
+    data.frame(variable = v,
+               p_value = p,
+               df = as.numeric(ch$parameter),
+               n = n,
+               cramer_v = v_cramer,
+               significant = !is.na(p) && p < alpha,
+               stringsAsFactors = FALSE)
+  })
+
+  out <- do.call(rbind, results)
+  out[order(out$p_value), , drop = FALSE]
+}
+
+# ---- Ejecuta en tu dataset 'scoring'
+res_chi <- chi_cramer_simple(scoring_sin_na, gse_var = "GSE",
+                             alpha = 0.05, max_levels = 15, include_na = TRUE)
+
+# Ver solo las asociaciones significativas (p < 0.05) con su V de Cramer
+subset(res_chi, significant)
+# Ver todo ordenado por p-valor
+# res_chi
+
+```
+
+Se logra ver que de las variables categóricas que refieren a Sexo, Comportamiento, numero de meses con deuda vigente y morosa,  número de acreedores del último mes y el indicador "VC_CAS" presentan diferencias significativas entre sus categorías con el nivel socioeconómico.
+
+Para comprobar la relación entre numéricas y categórica (GSE) utilizaremos el test no paramétrico de Kruskall Wallis.
+
+```{r}
+library(dplyr)
+
+# --- Kruskal–Wallis: numéricas ~ GSE en 'scoring_sin_na' ---
+kw_todas_vs_GSE <- function(df, cat_var = "GSE", alpha = 0.05, min_n = 10) {
+  stopifnot(cat_var %in% names(df))
+  # Asegurar GSE como factor y filtrar NA en GSE
+  df[[cat_var]] <- as.factor(df[[cat_var]])
+  df <- df[!is.na(df[[cat_var]]), , drop = FALSE]
+
+  # Detectar numéricas
+  es_num <- vapply(df, function(x) is.numeric(x) || is.integer(x), logical(1))
+  num_vars <- setdiff(names(df)[es_num], cat_var)
+
+  res <- lapply(num_vars, function(v) {
+    dat <- df[, c(cat_var, v)]
+    # Filtrar valores finitos en la numérica
+    dat <- dat[is.finite(dat[[v]]) & !is.na(dat[[cat_var]]), , drop = FALSE]
+
+    k <- nlevels(dat[[cat_var]])
+    if (nrow(dat) < min_n || k < 2) return(NULL)
+
+    # Kruskal–Wallis
+    kw <- suppressWarnings(kruskal.test(dat[[v]] ~ dat[[cat_var]]))
+    H  <- as.numeric(kw$statistic)
+    df1 <- as.numeric(kw$parameter)  # = k - 1
+    p  <- kw$p.value
+    n  <- nrow(dat)
+
+    # Epsilon-squared (efecto) para KW: ε² = (H - k + 1) / (n - k)
+    eps2 <- if (n > k) (H - k + 1) / (n - k) else NA_real_
+
+    # Clasificación del tamaño de efecto (puntos de referencia tipo Cohen)
+    efecto_cls <- case_when(
+      is.na(eps2)        ~ NA_character_,
+      eps2 < 0.01        ~ "<0.01 (muy pequeño)",
+      eps2 < 0.06        ~ "pequeño (~0.01)",
+      eps2 < 0.14        ~ "mediano (~0.06)",
+      TRUE               ~ "grande (≥0.14)"
+    )
+
+    data.frame(
+      variable = v,
+      n = n,
+      grupos = k,
+      H = H,
+      df = df1,
+      p_value = p,
+      epsilon2 = eps2,
+      efecto = efecto_cls,
+      significativo = !is.na(p) && p < alpha,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  out <- do.call(rbind, res)
+  if (is.null(out) || nrow(out) == 0) return(out)
+
+  # Ajuste por múltiples pruebas (Benjamini–Hochberg)
+  out$p_adj_BH <- p.adjust(out$p_value, method = "BH")
+
+  # Ordenar por p-value
+  out <- out[order(out$p_value), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+# --- Ejecutar con tu data ---
+res_kw <- kw_todas_vs_GSE(scoring_sin_na, cat_var = "GSE", alpha = 0.05)
+
+# Ver solo significativas (p < 0.05)
+subset(res_kw, significativo)
+
+# Ver todo ordenado por p-valor
+# res_kw
+
+```
+
+Podemos notar que las únicas variables con una asociación grande en este caso es renta y avalúo, mientras las demás sugieren ser insignificantes a pesar de encontrar diferencias significativas. Estas variables de renta y avalúo presentan una correlación alta. Por lo tanto, se descartará una de ellas. Se considera eliminar avalúo, ya que incluir variables que tengan una correlación importantes entre sí lleva al modelo a confusiones de asignaciones de peso, entregando un peor rendimiento.
+
+## **Modelo de regresión multilogística**
+
+Ahora se plantea el modelo de regresión Multilogística, para el tratamiento de valores faltantes en la variable nivel socioeconómico.
+
+```{r}
+# Paquetes necesarios
+# install.packages(c("nnet","caret","dplyr"))
+library(nnet)
+library(caret)
+library(dplyr)
+
+# 1) Datos: tomamos solo filas sin NA en GSE, RENTA y AVALUO
+dat <- scoring_sin_na %>%
+  select(GSE, RENTA) %>%
+  filter(!is.na(GSE), is.finite(RENTA)) %>%
+  mutate(GSE = droplevels(as.factor(GSE)))
+
+# 2) Split 80/20 estratificado en GSE
+set.seed(123)
+idx <- createDataPartition(dat$GSE, p = 0.80, list = FALSE)
+train <- dat[idx, ]
+test  <- dat[-idx, ]
+
+# 3) Estandarizar predictores con estadísticas del train
+stats_train <- train %>%
+  summarise(
+    RENTA_mu = mean(RENTA), RENTA_sd = sd(RENTA)
+  )
+
+# Evitar divisiones por cero si sd=0 (poco probable)
+sR <- ifelse(stats_train$RENTA_sd  == 0, 1, stats_train$RENTA_sd)
+
+
+train <- train %>%
+  mutate(RENTA_z  = (RENTA  - stats_train$RENTA_mu)  / sR)
+
+test <- test %>%
+  mutate(RENTA_z  = (RENTA  - stats_train$RENTA_mu)  / sR)
+
+# 4) Modelo: logística multinomial (GSE ~ RENTA + AVALUO)
+fit <- multinom(GSE ~ RENTA_z, data = train, trace = FALSE)
+
+# 5) Predicción en test
+pred_class <- predict(fit, newdata = test, type = "class")
+# (opc) Probabilidades:
+# pred_prob  <- predict(fit, newdata = test, type = "probs")
+
+# 6) Matriz de confusión y métricas
+cm <- confusionMatrix(
+  data = factor(pred_class, levels = levels(test$GSE)),
+  reference = test$GSE
+)
+
+```
+
+### **Resumen del modelo**
+
+```{r}
+# ----- Resultados -----
+cm$table         # Matriz de confusión
+cm$overall       # Accuracy, Kappa, etc.
+cm$byClass       # Sensibilidad/Especificidad por clase (uno-vs-rest)
+
+# Matriz de confusión en porcentajes por clase PREDICHA (filas suman 100%)
+tbl <- cm$table
+rs  <- rowSums(tbl)
+pct_pred <- sweep(tbl, 1, ifelse(rs == 0, 1, rs), FUN = "/") * 100
+pct_pred[rs == 0, ] <- 0
+round(pct_pred, 2)
+```
+
+Viendo esto, podemos notar que la precisión del modelo de regresión multilogística en cada una de las categorías del grupo socioeconómico es de 62.82% en AB, 0% para C2, 36.42% para C3, 37.52% para D y 0% en la categoría E. Por lo tanto, este rendimiento se considera pobre e inutilizable de manera válida, al ser menor a 70%.
+
+## **Modelo KNN**
+
+Ahora utilizaremos el modelo KNN para la clasificación de GSE, utilizando renta como variable predictora. Además, seleccionando la cantidad de k-veciones que optimice la métrica accuracy.
+
+```{r}
+# install.packages(c("caret","dplyr"))
+library(caret)
+library(dplyr)
+
+# 1) Datos: GSE (factor) y RENTA (num), sin NA
+dat <- scoring_sin_na %>%
+  select(GSE, RENTA) %>%
+  filter(!is.na(GSE), is.finite(RENTA)) %>%
+  mutate(GSE = droplevels(as.factor(GSE)))
+
+# 2) Split 80/20 estratificado por GSE
+set.seed(123)
+idx <- createDataPartition(dat$GSE, p = 0.80, list = FALSE)
+train <- dat[idx, ]
+test  <- dat[-idx, ]
+
+# 3) Entrenamiento KNN (solo RENTA), con centrado/escala y tuning de k por CV
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold CV
+fit_knn <- train(
+  GSE ~ RENTA,
+  data = train,
+  method = "knn",
+  preProcess = c("center", "scale"),
+  trControl = ctrl,
+  tuneLength = 15  # prueba varios k y elige el mejor
+)
+
+fit_knn              # para ver el k óptimo y el accuracy de CV
+fit_knn$bestTune     # k seleccionado
+
+# 4) Predicción en test y evaluación
+pred_class <- predict(fit_knn, newdata = test)
+cm <- confusionMatrix(pred_class, test$GSE)
+
+# 5) Resultados
+cm$table     # Matriz de confusión
+cm$overall   # Accuracy, Kappa, etc.
+cm$byClass   # Métricas por clase (uno-vs-rest)
+
+# Requiere que ya tengas: fit_knn (entrenado) y 'test' (20%)
+# Si no los tienes, usa el bloque de KNN que hicimos antes.
+
+library(caret)
+library(dplyr)
+
+# 1) Predicciones en test
+pred_class <- predict(fit_knn, newdata = test)
+
+
+
+
+
+```
+
+El numero de k-vecinos óptimos para el accuracy es 31, con un accuracy de 0.477, el cual igualmente se considera con un rendimiento pobre.
+
+### **Resumen del modelo**
+
+```{r}
+# 3) Matriz de porcentajes por clase predicha (filas suman 100%)
+#    => "Si digo que es X, ¿con qué % acierto a X (diagonal)?"
+tbl <- cm$table
+rs  <- rowSums(tbl)
+pct_pred <- sweep(tbl, 1, ifelse(rs == 0, 1, rs), FUN = "/") * 100
+pct_pred[rs == 0, ] <- 0  # por si alguna clase no fue predicha
+round(pct_pred, 2)
+
+
+# 2) Matriz de confusión (cuentas)
+cm <- confusionMatrix(pred_class, test$GSE)
+cm$table  # filas = Predicción, columnas = Referencia
+```
+
+Podemos notar que en varios casos la probabilidad de acierto (precisión) de la clasificación sube al menos un 10% más en comparación al modelo de clasificación multilogístico. Para la categoría AB se presenta una diferencia insignificante, prediciendo correctamente un 62.8% de los casos, en la categoría C2 aumenta a 38.2%, luego de 53.38% para C3, para D es de 48.59% y nuevamente no hay predicción acertada para la categoría de E, afectado por el desbalance en esta categoría.
+
+## **Conclusiones de la imputación de valores faltantes en GSE**
+
+Cuando la fracción de datos faltantes en una variable es pequeña, imputar (rellenar) esos vacíos suele no distorsionar las conclusiones: las distribuciones, las medias y las relaciones con otras variables se conservan razonablemente bien. En cambio, a medida que el porcentaje de ausencia crece, y en especial cuando los datos no son “completamente al azar” (no MCAR)—por ejemplo, cuando faltan justo en los casos con ingresos muy altos o muy bajos—, la imputación puede introducir sesgos. En esos escenarios, el método acierta sistemáticamente valores con menor información y termina empujando el análisis hacia estimaciones demasiado optimistas o conservadoras.
+
+El artículo sugiere una regla práctica: antes de imputar, reducir el faltante total a alrededor de 10% o menos, eliminando variables que concentran la mayor parte de los vacíos, siempre que su eliminación no comprometa la validez del estudio. Con ese recorte previo, la imputación trabaja sobre “huecos” residuales más pequeños y menos estructurados, lo que disminuye el riesgo de sesgo y ayuda a preservar las relaciones reales entre variables (Romero-Duque et al., 2023).
+
+Como ninguno de estos modelos logra clasificar GSE con un rendimiento y robustez óptimos, utilizar estos modelos y variables no resulta válido al presentar más de un 50% de valores faltantes dentro de su variable; por lo tanto, derivaría en errores y sesgos altos. Esta variable, al no ser útil tal como está y no validar su estimación, se eliminará del análisis.
+
+
+```{r}
+# Eliminar la columna GSE
+library(dplyr)
+scoring <- scoring %>% select(-GSE)
+```
+
+# **Análisis exploratorio de los datos**
+
+## **Definición**
+
+Se define una correcta estructura de los datos, para un posterior análisis univariado, bivariado y multivariado.
+
+```{r}
+# --- PASO 1: ASEGURARSE DE QUE TU DATAFRAME EXISTA ---
+
+
+# Variables Categóricas (se convierten a tipo 'factor')
+
+scoring$COMPORTAMIENTO <- as.factor(scoring$COMPORTAMIENTO)
+scoring$SEXO <- as.factor(scoring$SEXO)
+scoring$TIPO_NAC <- as.factor(scoring$TIPO_NAC)
+scoring$EST_CIVIL <- as.factor(scoring$EST_CIVIL)
+scoring$VER_TRA <- as.factor(scoring$VER_TRA)
+scoring$VER_DOM <- as.factor(scoring$VER_DOM)
+scoring$VC_CAS <- as.factor(scoring$VC_CAS)
+scoring$MAXUTIL <- as.factor(scoring$MAXUTIL)
+scoring$IND_IF <- as.factor(scoring$IND_IF)
+scoring$IND_BC <- as.factor(scoring$IND_BC)
+
+# Variables Numéricas (se aseguran de ser de tipo 'numeric')
+scoring$RENTA <- as.numeric(scoring$RENTA)
+scoring$AVALUO <- as.numeric(scoring$AVALUO)
+scoring$EDAD <- as.numeric(scoring$EDAD)
+scoring$NCC <- as.numeric(scoring$NCC)
+scoring$NDIR <- as.numeric(scoring$NDIR)
+scoring$NACR <- as.numeric(scoring$NACR)
+scoring$LINEACRNU <- as.numeric(scoring$LINEACRNU)
+scoring$DDA_HIPOT <- as.numeric(scoring$DDA_HIPOT)
+scoring$NUM_VIG_12 <- as.numeric(scoring$NUM_VIG_12)
+scoring$NUM_MOR_12 <- as.numeric(scoring$NUM_MOR_12)
+scoring$RPXLCNU <- as.numeric(scoring$RPXLCNU)
+scoring$RPXDCOM <- as.numeric(scoring$RPXDCOM)
+scoring$RPXDCON <- as.numeric(scoring$RPXDCON)
+scoring$TMOT_06 <- as.numeric(scoring$TMOT_06)
+scoring$TDOC <- as.numeric(scoring$TDOC)
+scoring$TMOT_12 <- as.numeric(scoring$TMOT_12)
+scoring$NTCRED <- as.numeric(scoring$NTCRED)
+
+
+# --- PASO 3: VERIFICAR LA ESTRUCTURA FINAL ---
+# Esto te mostrará el tipo de dato de cada columna para confirmar los cambios.
+str(scoring)
+```
+
+## **Univariado**
+
+### **Numéricas**
+
+Se utilizará las siguientes medidas para complementar un análisis con los gráficos a utilizar.
+
+```{r}
+
+# Cargar la librería
+library(dplyr)
+
+# Usar el pipe (%>%) para una sintaxis más limpia
+scoring_numericas <- scoring %>%
+  select(where(is.numeric))
+
+summary(scoring_numericas)
+```
+
+```{r}
+# --- PASO 1: CARGAR LA LIBRERÍA ---
+library(plotly)
+
+# --- PASO 3: PREPARAR LOS DATOS PARA EL MENÚ (¡CORREGIDO!) ---
+botones_menu <- lapply(names(scoring_numericas), function(variable) {
+  
+  # Calcular la densidad de la variable
+  densidad_data <- density(scoring_numericas[[variable]])
+  
+  list(
+    method = "restyle",
+    label = variable,
+    args = list(
+      # Lista de actualizaciones para cada traza.
+      # El orden es Boxplot (Traza 0) y Gráfico de Densidad (Traza 1).
+      list(
+        # Atributos para la Traza 0 (Boxplot)
+        y = list(scoring_numericas[[variable]]),
+        name = list(variable)
+      ),
+      list(
+        # Atributos para la Traza 1 (Gráfico de Densidad)
+        x = list(densidad_data$x),
+        y = list(densidad_data$y),
+        name = list(variable)
+      )
+    ),
+    
+    # Índices de las trazas a actualizar
+    args2 = list(0, 1) 
+  )
+})
+
+# --- PASO 4: CREAR LOS GRÁFICOS INICIALES Y COMBINARLOS ---
+densidad_inicial <- density(scoring_numericas[[1]])
+
+# Gráfico de Boxplot (Traza 0)
+p_boxplot <- plot_ly(
+  y = scoring_numericas[[1]], 
+  type = "box", 
+  name = names(scoring_numericas)[1]
+) %>%
+  layout(yaxis = list(title = "Valor"))
+
+# Gráfico de Densidad (Traza 1)
+p_densidad <- plot_ly(
+  x = densidad_inicial$x, 
+  y = densidad_inicial$y, 
+  type = "scatter", 
+  mode = "lines", 
+  fill = "tozeroy",
+  name = names(scoring_numericas)[1]
+) %>%
+  layout(yaxis = list(title = "Densidad"), xaxis = list(title = "Valor"))
+
+# Combinar los dos gráficos
+p_combinado <- subplot(
+  p_boxplot, 
+  p_densidad, 
+  nrows = 1,
+  shareY = FALSE,
+  shareX = FALSE
+) %>%
+layout(
+  updatemenus = list(
+    list(
+      type = "dropdown",
+      buttons = botones_menu,
+      x = 0.05,
+      y = 1.05
+    )
+  ),
+  title = "Boxplot y Gráfico de Densidad (Univariado)"
+)
+
+# --- PASO 5: MOSTRAR EL GRÁFICO ---
+p_combinado
+
+
+
+
+```
+
+
+RENTA: Es posible ver que al menos el 50% de los clientes cuentan con una renta menor o igual a 1.62 M y al menos un 25% tienen una renta mayor o igual a 3.16 M, con una mediana de 1.62 M y un rango entre 0 y 16.96 M. Además, la media (2.49 M) es mayor que la mediana (1.62 M), lo que sugiere atípicos altos/cola derecha.
+
+AVALÚO: Es posible ver que al menos el 50% de los clientes cuentan con un avalúo menor o igual a 0.44 M y al menos un 25% tienen un avalúo mayor o igual a 0.92 M, con una mediana de 0.44 M y un rango entre 0 y 16.26 M. Además, la media (0.76 M) es mayor que la mediana (0.44 M), lo que sugiere atípicos altos/cola derecha.
+
+EDAD: Es posible ver que al menos el 50% de los clientes tienen una edad menor o igual a 40 años y al menos un 25% tienen una edad mayor o igual a 50 años, con una mediana de 40 años y un rango entre 17 y 98 años. Además, la media (41.08) es mayor que la mediana (40), lo que sugiere ligera cola derecha (edades altas).
+
+NCC: Es posible ver que al menos el 75% de los clientes cuentan con 0 cuentas corrientes, con una mediana de 0 y un rango entre 0 y 15. Además, la media (0.25) es mayor que la mediana (0), lo que sugiere cola derecha con pocos valores altos.
+
+NDIR: Es posible ver que al menos el 50% de los clientes cuentan con ≤ 1 dirección y al menos un 25% tienen ≥ 3, con una mediana de 1 y un rango entre 0 y 15. Además, la media (1.87) es mayor que la mediana (1), lo que sugiere atípicos altos/cola derecha.
+
+NACR: Es posible ver que al menos el 75% de los clientes cuentan con 0 acreedores, con una mediana de 0 y un rango entre 0 y 6. Además, la media (0.11) es mayor que la mediana (0), lo que sugiere cola derecha.
+
+LINEACRNU: Es posible ver que al menos el 75% de los clientes cuentan con 0.00 en línea de crédito no utilizada, con una mediana de 0.00 y un rango entre 0.00 y 6467.82. Además, la media (9.13) es mayor que la mediana (0.00), lo que sugiere atípicos altos/cola derecha marcada.
+
+DDA_HIPOT: Es posible ver que al menos el 75% de los clientes cuentan con 0.00 de deuda hipotecaria, con una mediana de 0.00 y un rango entre 0.00 y 16950.24. Además, la media (60.29) es mayor que la mediana (0.00), lo que sugiere atípicos altos/cola derecha.
+
+NUM_VIG_12: Es posible ver que al menos el 50% de los clientes cuentan con ≤ 0 meses con deuda vigente y al menos un 25% tienen exactamente 12 meses, con una mediana de 0 y un rango entre 0 y 12. Además, la media (3.68) es mayor que la mediana (0), lo que sugiere cola derecha (subgrupo con muchos meses vigentes).
+
+NUM_MOR_12: Es posible ver que al menos el 50% de los clientes cuentan con ≤ 0 meses con deuda morosa y al menos un 25% tienen ≥ 1 mes, con una mediana de 0 y un rango entre 0 y 12. Además, la media (1.42) es mayor que la mediana (0), lo que sugiere cola derecha (casos con varios meses morosos).
+
+RPXLCNU: Es posible ver que al menos el 75% presentan un valor ≤ 0.00, con una mediana de 0.00 y un rango entre 0.00 y 1.00. Además, la media (0.10) es mayor que la mediana (0.00), lo que sugiere cola derecha.
+
+RPXDCOM: Es posible ver que al menos el 75% presentan un valor ≤ 0.00, con una mediana de 0.00 y un rango entre 0.00 y 1.00. Además, la media (0.053) es mayor que la mediana (0.00), lo que sugiere sesgo en cola derecha.
+
+RPXDCON: Es posible ver que al menos el 50% presentan un valor ≤ 0.00 y al menos un 25% presentan un valor ≥ 0.93, con una mediana de 0.00 y un rango entre 0.00 y 1.00. Además, la media (0.31) es mayor que la mediana (0.00), lo que sugiere cola derecha.
+
+TMOT_06 (UF): Es posible ver que al menos el 50% registran un monto ≤ 0.89 UF y al menos un 25% registran un monto ≥ 6.98 UF, con una mediana de 0.89 UF y un rango entre 0.00 UF y 100.28 UF. Además, la media (8.42 UF) es mayor que la mediana (0.89 UF), lo que sugiere atípicos altos/cola derecha.
+
+TDOC: Es posible ver que al menos el 50% cuentan con ≤ 2 documentos y al menos un 25% tienen ≥ 6 documentos, con una mediana de 2 y un rango entre 0 y 50. Además, la media (4.85) es mayor que la mediana (2), lo que sugiere cola derecha.
+
+TMOT_12 (UF): Es posible ver que al menos el 50% registran un monto ≤ 8.66 UF y al menos un 25% registran un monto ≥ 35.00 UF, con una mediana de 8.66 UF y un rango entre 0.00 UF y 708.54 UF. Además, la media (37.50 UF) es mayor que la mediana (8.66 UF), lo que sugiere atípicos altos/cola derecha.
+
+NTCRED: Es posible ver que al menos el 75% cuentan con 0 tarjetas nuevas, con una mediana de 0 y un rango entre 0 y 5. Además, la media (0.084) es mayor que la mediana (0), lo que sugiere cola derecha.
+
+### **Categóricas**
+
+Se analiza cada variable categórica, visualizando como distribuye cada categoría en base a su frecuencia, logrando visualizar también si hay variables desbalanceadas.
+
+```{r}
+# Creamos el nuevo data.frame 'scoring_categoricas'
+scoring_categoricas <- scoring %>%
+  select_if(is.factor)
+
+# Si también quieres incluir variables de tipo carácter, usa la siguiente línea en su lugar:
+# scoring_categoricas <- scoring %>%
+#   select_if(is.factor | is.character)
+
+# Verificamos el resultado
+str(scoring_categoricas)
+
+```
+
+```{r, warning=FALSE}
+# --- Porcentajes por categoría (texto simple, ordenado) ---
+
+# Helper para contar únicos sin NA (evita cargar paquetes)
+n_distinct_na <- function(x) length(unique(x[!is.na(x)]))
+
+# Criterio de variables categóricas:
+# - factor o character
+# - o numéricas con <= max_levels valores únicos (ajusta si quieres)
+max_levels <- 10
+is_categorical <- function(x) {
+  is.factor(x) || is.character(x) || (is.numeric(x) && n_distinct_na(x) <= max_levels)
+}
+
+# Data frame: usa 'scoring'
+cat_vars <- names(scoring)[vapply(scoring, is_categorical, logical(1))]
+
+# Si prefieres forzar un set específico, descomenta y edita:
+# cat_vars <- c("COMPORTAMIENTO","SEXO","TIPO_NAC","EST_CIVIL","GSE",
+#               "VER_TRA","VER_DOM","VC_CAS","IND_IF","IND_BC",
+#               "RENTA_MINIMA")
+
+imprime_porcentajes <- function(df, vars = cat_vars, include_na = FALSE, digits = 2) {
+  for (v in vars) {
+    x <- df[[v]]
+    if (is.null(x)) next
+
+    useNA <- if (include_na) "ifany" else "no"
+    # Tabla y proporciones (prop.table usa como denominador el total de celdas de la tabla)
+    tab_counts <- table(x, useNA = useNA)
+    if (sum(tab_counts) == 0) next
+
+    tab_props  <- prop.table(tab_counts)
+    # Ordenar por porcentaje desc
+    ord <- order(tab_props, decreasing = TRUE)
+    tab_counts <- tab_counts[ord]
+    tab_props  <- tab_props[ord]
+
+    # Denominador explícito para mostrar (coincide con prop.table)
+    denom <- sum(tab_counts)
+
+    cat("\n", v, ":\n", sep = "")
+    for (i in seq_along(tab_props)) {
+      label <- names(tab_props)[i]
+      if (label == "<NA>") label <- "NA"
+      cat(sprintf("  - %s: %.*f%% (%s de %s)\n",
+                  label,
+                  digits,
+                  100 * as.numeric(tab_props[i]),
+                  format(as.integer(tab_counts[i]), big.mark = "."),
+                  format(as.integer(denom), big.mark = ".")))
+    }
+  }
+}
+
+# ---- Ejecuta:
+imprime_porcentajes(scoring, include_na = FALSE, digits = 2)
+# Cambia a include_na = TRUE si quieres ver NA como categoría.
+
+```
+
+```{r}
+# --- PASO 1: CARGAR LAS LIBRERÍAS ---
+library(plotly)
+library(dplyr)
+
+# --- PASO 2: PREPARAR LOS DATOS (CONTAR Y CALCULAR PORCENTAJES) ---
+data_porcentajes <- lapply(names(scoring_categoricas), function(var) {
+  scoring_categoricas %>%
+    count(!!sym(var)) %>%
+    mutate(
+      porcentaje = n / sum(n),
+      variable = var
+    ) %>%
+    rename(categoria = 1)
+})
+
+# --- PASO 3: PREPARAR EL MENÚ DESPLEGABLE ---
+botones_menu <- lapply(data_porcentajes, function(df) {
+  list(
+    method = "restyle",
+    label = df$variable[1],
+    args = list(
+      list(
+        labels = list(df$categoria),
+        values = list(df$porcentaje),
+        name   = list(df$variable[1])
+      ),
+      list(0)  # Aplicar los cambios a la primera traza
+    )
+  )
+})
+
+# --- PASO 4: CREAR EL GRÁFICO INICIAL Y AÑADIR EL MENÚ ---
+primer_df <- data_porcentajes[[1]]
+p <- plot_ly(
+  labels = primer_df$categoria,
+  values = primer_df$porcentaje,
+  type = "pie",
+  name = primer_df$variable[1]
+) %>%
+  layout(
+    title = "Distribución Porcentual de Variables Categóricas",
+    updatemenus = list(
+      list(
+        type = "dropdown",
+        buttons = botones_menu,
+        x = 0.05,
+        y = 1.05
+      )
+    )
+  )
+
+# --- PASO 5: MOSTRAR EL GRÁFICO ---
+p
+
+
+
+```
+
+COMPORTAMIENTO: Es posible ver que MALO concentra 52,33% y BUENO 47,67%; hay ligero desbalance hacia MALO, pero cercano al equilibrio.
+
+SEXO: Es posible ver que la categoría 0 representa 51,57% y 1, 48,43%; distribución casi balanceada (si 0 = masculino y 1 = femenino, leve mayoría masculina).
+
+TIPO_NAC: Es posible ver que C concentra 97,96%, mientras N (1,15%) y E (0,88%) son minorías; variable altamente sesgada a un solo nivel.
+
+EST_CIVIL: Es posible ver que C alcanza 53,07% y S, 41,27%; D (2,97%), V (1,55%) y N (1,13%) son poco frecuentes; distribución razonablemente informativa con colas pequeñas.
+
+VER_TRA: Es posible ver que 0 llega a 98,50% y 1, 1,50%; indicador muy raro en 1 (alta masa en 0).
+
+VER_DOM: Es posible ver que 0 concentra 95,92% y 1, 4,08%; patrón muy sesgado a 0.
+
+NACR: Es posible ver que 0 representa 96,74%; luego, 3: 2,52%; 4: 0,64%; 5: 0,07%; y 6: 0,03%. Distribución extremadamente concentrada en 0, con ausencia de 1–2 (conviene verificar codificación).
+
+VC_CAS: Es posible ver que 0 suma 69,78% y 1, 30,22%; presencia no menor de casos con vencida/castigada (1).
+
+MAXUTIL: Es posible ver que 1 domina con 98,36% y 0, 1,64%; indicador casi constante (revisar significado/codificación; puede aportar poca discriminación).
+
+IND_IF: Es posible ver que 0 alcanza 81,26% y 1, 18,74%; minoría no despreciable en 1.
+
+IND_BC: Es posible ver que 0 representa 68,20% y 1, 31,80%; mayor presencia del 1 que en IND_IF.
+
+NTCRED: Es posible ver que 0 concentra 92,92%; 1, 6,20%, y valores ≥ 2 son muy poco frecuentes.
+
+
+La variable TIPO_NAC presenta un marcado desbalance, con predominio de clientes chilenos. De igual forma, VER_TRA y VER_DOM se concentran en la categoría 0, patrón que también se observa en NACR, IND_IF, NTCRED y MAXUTIL. En cambio, VC_CAS e IND_BC muestran desbalances más moderados, con una categoría predominante cercana al 70%. Este panorama es relevante, porque algunas variables podrían aportar poca información a un modelo predictivo debido a la excesiva predominancia de una sola categoría.
+
+## **Bivariado**
+
+Se realiza análisis Bivariado para las variables que pueden tener una relación directa con la variable objetivo (Comportamiento del Cliente), encontrando los siguientes resultados
+
+### **Numéricas**
+
+```{r}
+stopifnot("COMPORTAMIENTO" %in% names(scoring))
+scoring <- scoring %>%
+  mutate(
+    COMPORTAMIENTO = factor(COMPORTAMIENTO, levels = c("BUENO","MALO"))
+  )
+
+# Paleta sencilla y consistente
+col_BUENO <- "#2E7D32"  # verde
+col_MALO  <- "#C62828"  # rojo
+
+# Función utilitaria: densidad segura
+.density_df <- function(x) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(tibble(x = numeric(0), y = numeric(0)))
+  d <- density(x)
+  tibble(x = d$x, y = d$y)
+}
+```
+
+```{r}
+vars_num_dens <- c("RENTA", "EDAD", "AVALUO", "DDA_HIPOT")
+missing_vars  <- setdiff(vars_num_dens, names(scoring))
+if (length(missing_vars)) stop("Faltan variables numéricas para densidad: ", paste(missing_vars, collapse=", "))
+
+# Precomputar densidades por variable y clase
+dens_list <- map(vars_num_dens, function(v){
+  df <- scoring %>%
+    select(.data[[v]], COMPORTAMIENTO) %>%
+    filter(!is.na(.data[[v]]), !is.na(COMPORTAMIENTO))
+  list(
+    var = v,
+    bueno = .density_df(df %>% filter(COMPORTAMIENTO=="BUENO") %>% pull(.data[[v]])),
+    malo  = .density_df(df %>% filter(COMPORTAMIENTO=="MALO")  %>% pull(.data[[v]]))
+  )
+})
+
+# Construir figura con una traza por clase por variable; activar solo la primera variable
+vis_init <- rep(FALSE, length(dens_list) * 2) # 2 clases por variable
+vis_init[1:2] <- TRUE
+
+p_dens <- plot_ly()
+for (i in seq_along(dens_list)) {
+  dl <- dens_list[[i]]
+  # BUENO
+  p_dens <- p_dens %>%
+    add_trace(
+      x = dl$bueno$x, y = dl$bueno$y,
+      type = "scatter", mode = "lines",
+      name = "BUENO", legendgroup = "BUENO",
+      line = list(width = 2, color = col_BUENO),
+      visible = if (i == 1) TRUE else FALSE
+    ) %>%
+    # MALO
+    add_trace(
+      x = dl$malo$x, y = dl$malo$y,
+      type = "scatter", mode = "lines",
+      name = "MALO", legendgroup = "MALO",
+      line = list(width = 2, color = col_MALO),
+      visible = if (i == 1) TRUE else FALSE,
+      fill = "tozeroy", fillcolor = "rgba(198,40,40,0.08)"
+    )
+}
+
+# Menú desplegable: cambia visibilidad de pares de trazas
+buttons <- map(seq_along(dens_list), function(i){
+  vis <- rep(FALSE, length(dens_list)*2)
+  vis[(2*i-1):(2*i)] <- TRUE
+  list(
+    method = "restyle",
+    label  = dens_list[[i]]$var,
+    args   = list(list(visible = vis),
+                  list())
+  )
+})
+
+p_dens <- p_dens %>%
+  layout(
+    title = "Densidad de Deuda Hipotecaria por Comportamiento",
+    xaxis = list(title = vars_num_dens[1]),
+    yaxis = list(title = "Densidad"),
+    updatemenus = list(list(
+      type = "dropdown", x = 0.02, y = 1.06, direction = "down",
+      buttons = buttons
+    )),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15)
+  )
+
+p_dens
+
+```
+
+
+
+Edad - Comportamiento: Los clientes con comportamiento MALO se concentran entre los 30 y 50 años, rango donde también hay mayor densidad de comportamiento BUENO, aunque la categoría Malo con mayor predominio, lo que sugiere que la edad media adulta presenta mayor riesgo crediticio, pero no con una tendencia muy notoria.
+
+Renta - Comportamiento: Los clientes con comportamiento BUENO muestran una distribución más concentrada en rentas bajas-medias, mientras que los MALO presentan una cola más extensa hacia rentas altas, Esto no indica una relación directa entre el comportamiento del cliente y su renta, pero si se reporta una mayor cantidad de casos de comportamiento malo que de bueno cuando la renta es mayor. Por otra parte, se nota una mayor cantidad de comportamiento Bueno cuando la renta es menor al millón de pesos
+
+Avalúo - Comportamiento: Ambos grupos se concentran en avalúos bajos, pero los clientes MALO presentan densidad ligeramente mayor en valores altos, lo que sugiere que tener bienes de alto avalúo no necesariamente se asocia a mejor comportamiento crediticio. Esta comparación tiene una interpretación similar a la anterior. Nuevamente avalúos bajos pueden mostrar mayor cantidad de comportamiento bueno.
+
+Deuda hipotecaria (DDA_HIPOT) - Comportamiento: Los clientes MALO exhiben una distribución más amplia hacia valores positivos, con mayor dispersión de deuda hipotecaria, mientras que los BUENO se agrupan cerca de cero, indicando niveles más controlados de endeudamiento.
+
+### **Categóricas**
+
+Ahora se desean estudiar variables categóricas con la variable de interés (Comportamiento).
+
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(forcats)
+  library(tidyr)
+  library(plotly)
+})
+
+# ==== Colores por defecto (si no existen) ====
+if (!exists("col_BUENO")) col_BUENO <- "#2E7D32"  # verde
+if (!exists("col_MALO"))  col_MALO  <- "#C62828"  # rojo
+
+# ==== Chequeos básicos ====
+stopifnot(exists("scoring"))
+vars_cat_barras <- c("SEXO", "TIPO_NAC", "EST_CIVIL")
+missing_cats    <- setdiff(vars_cat_barras, names(scoring))
+if (length(missing_cats)) stop("Faltan variables categóricas: ", paste(missing_cats, collapse = ", "))
+
+if (!("COMPORTAMIENTO" %in% names(scoring))) stop("Falta la variable COMPORTAMIENTO")
+
+# ==== Normaliza COMPORTAMIENTO a niveles BUENO/MALO ====
+scoring <- scoring %>%
+  mutate(
+    COMPORTAMIENTO = {
+      x <- as.character(COMPORTAMIENTO)
+      x <- trimws(toupper(x))
+      x[x %in% c("0","BUENO")] <- "BUENO"
+      x[x %in% c("1","MALO")]  <- "MALO"
+      factor(x, levels = c("BUENO","MALO"))
+    }
+  )
+
+# ==== Función: preparar % por categoría (top-n + NA explícito) ====
+prep_cat <- function(var, top_n = 12) {
+  # var es un string, usamos .data[[var]] para evitar NSE
+  df <- scoring %>%
+    transmute(
+      COMPORTAMIENTO = COMPORTAMIENTO,
+      cat = .data[[var]]
+    ) %>%
+    mutate(
+      cat = as.factor(cat),
+      cat = fct_explicit_na(cat, na_level = "NA (faltante)"),
+      cat = fct_lump_n(cat, n = top_n, other_level = "Otros")
+    ) %>%
+    count(cat, COMPORTAMIENTO, name = "n") %>%
+    group_by(cat) %>%
+    mutate(pct = n / sum(n)) %>%
+    ungroup() %>%
+    group_by(cat) %>%
+    mutate(total_cat = sum(n)) %>%
+    ungroup() %>%
+    mutate(cat = reorder(cat, total_cat))
+  df
+}
+
+# ==== Función: alinear BUENO/MALO y empaquetar para plotly ====
+align_for_plot <- function(df, varname){
+  wide <- df %>%
+    mutate(cat = as.character(cat)) %>%
+    select(cat, COMPORTAMIENTO, n, pct) %>%
+    tidyr::pivot_wider(
+      names_from  = COMPORTAMIENTO,
+      values_from = c(n, pct),
+      values_fill = 0
+    ) %>%
+    mutate(total = n_BUENO + n_MALO) %>%
+    arrange(desc(total))
+
+  list(
+    y   = wide$cat,        # categorías (texto)
+    xB  = wide$pct_BUENO,  # % BUENO por categoría
+    xM  = wide$pct_MALO,   # % MALO por categoría
+    nB  = wide$n_BUENO,    # n BUENO
+    nM  = wide$n_MALO,     # n MALO
+    var = varname
+  )
+}
+
+# ==== Construcción (lista NOMBRADA por variable) ====
+cat_datasets_align <- setNames(
+  lapply(vars_cat_barras, function(v){
+    df <- prep_cat(v)
+    align_for_plot(df, v)
+  }),
+  vars_cat_barras
+)
+
+# ==== Gráfico inicial con la primera variable ====
+var_inicial <- vars_cat_barras[1]
+init <- cat_datasets_align[[var_inicial]]
+
+p_barras <- plot_ly()
+
+# Traza BUENO
+p_barras <- p_barras %>%
+  add_trace(
+    type = "bar",
+    orientation = "h",
+    name = "BUENO",
+    x = init$xB,
+    y = init$y,
+    customdata = init$nB,
+    marker = list(color = col_BUENO),
+    hovertemplate = paste0(
+      init$var, ": %{y}<br>",
+      "Clase: BUENO<br>",
+      "Porcentaje: %{x:.1%} (n=%{customdata})<extra></extra>"
+    ),
+    showlegend = TRUE
+  )
+
+# Traza MALO
+p_barras <- p_barras %>%
+  add_trace(
+    type = "bar",
+    orientation = "h",
+    name = "MALO",
+    x = init$xM,
+    y = init$y,
+    customdata = init$nM,
+    marker = list(color = col_MALO),
+    hovertemplate = paste0(
+      init$var, ": %{y}<br>",
+      "Clase: MALO<br>",
+      "Porcentaje: %{x:.1%} (n=%{customdata})<extra></extra>"
+    ),
+    showlegend = TRUE
+  )
+
+# ==== Menú de botones: actualiza x/y/customdata y el título del eje Y ====
+buttons_cat <- lapply(vars_cat_barras, function(v){
+  d <- cat_datasets_align[[v]]
+  list(
+    method = "update",
+    label  = v,
+    args   = list(
+      # Restyle (dos trazas: BUENO, MALO)
+      list(
+        x = list(d$xB, d$xM),
+        y = list(d$y,  d$y ),
+        customdata = list(d$nB, d$nM)
+      ),
+      # Relayout: título del eje Y
+      list(yaxis = list(title = v))
+    )
+  )
+})
+
+# ==== Layout final ====
+p_barras <- p_barras %>%
+  layout(
+    title = "Distribución de variables categóricas según Comportamiento",
+    barmode = "stack",
+    xaxis = list(title = "Porcentaje", tickformat = ".0%"),
+    yaxis = list(title = init$var),
+    updatemenus = list(list(
+      type = "dropdown",
+      x = 0.02, y = 1.06, direction = "down",
+      buttons = buttons_cat
+    )),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15),
+    margin = list(l = 160, r = 20, t = 60, b = 50)
+  )
+
+# ==== Render ====
+# En R Markdown/Quarto: deja p_barras como ÚLTIMA línea del chunk
+# En consola/script: usa print(p_barras) si no aparece
+p_barras
+
+```
+
+
+Sexo - Comportamiento: La proporción de clientes con comportamiento BUENO es ligeramente mayor en mujeres que en hombres, aunque en ambos casos los perfiles MALO también presentan una fracción relevante. En cuanto al comportamiento de los hombres, es predominante la categoría MALO con un 55% de observaciones.
+
+Tipo de nacionalidad (TIPO_NAC) - Comportamiento: Los clientes con nacionalidad extranjera muestran un leve predominio de comportamiento BUENO respecto a los nacionales y chilenos, lo que podría reflejar un perfil financiero más estable o menor exposición crediticia.
+
+Estado civil (EST_CIVIL) - Comportamiento: Las categorías “Casado” "Divorciado" y “Viudo” concentran mayor proporción de clientes con comportamiento MALO que de comportamiento BUENO, mientras que los “Solteros” y “No informados” presentan proporciones más equilibradas o con ligera ventaja de los BUENOS.
+
+### **Numéricas-Categóricas**
+
+Se analizarán relaciones entre variables numéricas y categóricas en el siguiente gráfico.
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(plotly)
+})
+
+# --- Asegura variable objetivo como factor BUENO/MALO ---
+scoring <- scoring %>%
+  mutate(
+    COMPORTAMIENTO = {
+      x <- as.character(COMPORTAMIENTO)
+      x <- trimws(toupper(x))
+      x[x %in% c("0","BUENO")] <- "BUENO"
+      x[x %in% c("1","MALO")]  <- "MALO"
+      factor(x, levels = c("BUENO","MALO"))
+    }
+  )
+
+# --- Define las 3 variables para violin (si no tienes un vector ya creado) ---
+vars_ratios <- c("RPXLCNU","RPXDCOM","RPXDCON")
+vars_ratios <- intersect(vars_ratios, names(scoring))
+if (length(vars_ratios) == 0) stop("Ninguna de las variables de violin está en 'scoring'.")
+
+# --- Función para preparar los vectores BUENO/MALO de cada variable ---
+prep_violin <- function(var){
+  d <- scoring %>%
+    select(COMPORTAMIENTO, !!sym(var)) %>%
+    filter(is.finite(.data[[var]])) %>%
+    mutate(COMPORTAMIENTO = droplevels(COMPORTAMIENTO))
+  list(
+    var  = var,
+    yB   = d %>% filter(COMPORTAMIENTO == "BUENO") %>% pull(!!sym(var)),
+    yM   = d %>% filter(COMPORTAMIENTO == "MALO")  %>% pull(!!sym(var))
+  )
+}
+
+packs <- lapply(vars_ratios, prep_violin)
+names(packs) <- vars_ratios
+
+# --- Gráfico inicial con la primera variable ---
+init <- packs[[ vars_ratios[1] ]]
+
+p_violin <- plot_ly()
+
+# Traza BUENO
+p_violin <- p_violin %>%
+  add_trace(
+    type = "violin",
+    name = "BUENO",
+    x = "BUENO",
+    y = init$yB,
+    box = list(visible = TRUE),
+    meanline = list(visible = TRUE),
+    points = "outliers"  # si no quieres puntos: "none"
+  )
+
+# Traza MALO
+p_violin <- p_violin %>%
+  add_trace(
+    type = "violin",
+    name = "MALO",
+    x = "MALO",
+    y = init$yM,
+    box = list(visible = TRUE),
+    meanline = list(visible = TRUE),
+    points = "outliers"
+  )
+
+# --- Botones del menú: cambian los vectores y y el título del eje Y ---
+buttons_violin <- lapply(vars_ratios, function(v){
+  d <- packs[[v]]
+  list(
+    method = "update",
+    label  = v,
+    args   = list(
+      # Restyle: y de BUENO y MALO (dos trazas en el orden en que se añadieron)
+      list(y = list(d$yB, d$yM)),
+      # Relayout: título del eje Y
+      list(yaxis = list(title = v, rangemode = "tozero"))
+    )
+  )
+})
+
+# --- Layout final (ya con botones) ---
+p_violin <- p_violin %>%
+  layout(
+    title  = "Distribución de RPXDCOM por COMPORTAMIENTO",
+    xaxis  = list(title = ""),
+    yaxis  = list(title = vars_ratios[1], rangemode = "tozero"),
+    updatemenus = list(list(
+      type = "dropdown",
+      x = 0.02, y = 1.06, direction = "down",
+      buttons = buttons_violin
+    )),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15),
+    violingap = 0.25,  # estética
+    violinmode = "group"
+  )
+
+# Render (en Rmd deja p_violin como última línea del chunk)
+p_violin
+
+```
+
+
+RPXLCNU - Comportamiento: Los clientes con comportamiento MALO muestran una mayor dispersión y valores más altos en la relación de línea de crédito no utilizada promedio respecto al máximo. Esto sugiere menor uso eficiente de su línea disponible, lo que podría asociarse con menor capacidad de gestión crediticia.
+
+RPXDCOM - Comportamiento: La relación de deuda comercial promedio a máxima es más elevada y dispersa en los clientes MALO, mientras que los BUENO presentan valores bajos y concentrados cerca de cero. Esto refleja una utilización más constante o elevada de deuda comercial en los perfiles de riesgo.
+
+RPXDCON - Comportamiento:
+Los clientes MALO presentan una clara concentración en valores altos de la relación de deuda de consumo, mientras que los BUENO mantienen proporciones cercanas a cero. Esto evidencia una mayor dependencia del crédito de consumo entre quienes muestran mal comportamiento. Esta variable tiene fuerte capacidad discriminante, muy útil para detectar el comportamiento del cliente en un posible modelo predictivo.
+
+
+## **Multivariado**
+
+\subsubsection{Matriz de correlaciones mixtas}
+
+Para analizar las asociaciones entre variables de distinto tipo se construyó una matriz comparativa que integra tres medidas de relación: el coeficiente de Spearman, la V de Cramér y el estadístico $\eta^{2}$. Cada una de ellas fue seleccionada según la naturaleza de las variables involucradas.
+
+El coeficiente de correlación de Spearman ($\rho$) se utilizó para medir la fuerza y dirección de la relación entre variables numéricas u ordinales. A diferencia del coeficiente de Pearson, Spearman no asume normalidad ni linealidad estricta, siendo adecuado para distribuciones sesgadas o con valores atípicos (Conover, 1999; Field, 2013). Esta medida se basa en los rangos de los datos y captura asociaciones monótonas, tanto lineales como no lineales.
+
+La V de Cramér se aplicó para evaluar la asociación entre variables categóricas. Derivada del estadístico chi-cuadrado, esta medida proporciona un valor normalizado entre 0 y 1 que refleja la magnitud de la relación en tablas de contingencia (Cramér, 1946; Agresti, 2019). A diferencia del chi-cuadrado tradicional, la V de Cramér corrige el efecto del tamaño de muestra y del número de categorías, permitiendo comparaciones más equilibradas entre diferentes pares de variables cualitativas.
+
+Por último, el coeficiente $\eta^{2}$ (eta cuadrado) se empleó para cuantificar la proporción de varianza explicada cuando se analiza una variable numérica en función de una variable categórica. Este estadístico, común en el análisis de varianza (ANOVA), permite estimar la fuerza de asociación entre ambos tipos de variables al expresar la fracción de la variabilidad total atribuible a las diferencias entre grupos (Cohen, 1988; Olejnik \& Algina, 2003).
+
+La combinación de estas tres medidas en una matriz única facilita la visualización de asociaciones entre variables numéricas, categóricas y mixtas dentro de un mismo marco interpretativo, permitiendo identificar patrones de relación relevantes para el análisis multivariante posterior.
+
+
+```{r}
+# ============================
+# Mapa de Asociación Mixto (estático)
+# ============================
+
+# Paquetes
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tidyr)
+  library(forcats)
+})
+
+# ----------------------------
+# 0) Preparación de variables
+# ----------------------------
+# Excluye ID, GSE (si ya no está) y otras que no quieras evaluar.
+vars_excluir <- c("ID_CLIENTE")   # agrega nombres si quieres excluir más
+df <- scoring %>% select(setdiff(names(scoring), vars_excluir))
+
+# Asegura tipos coherentes
+if ("COMPORTAMIENTO" %in% names(df)) {
+  df <- df %>% mutate(COMPORTAMIENTO = as.factor(COMPORTAMIENTO))
+}
+
+# Detectores de tipo
+is_num <- function(x) is.numeric(x) || is.integer(x)
+is_cat <- function(x) is.factor(x) || is.logical(x) || is.character(x)
+
+# ----------------------------
+# 1) Métricas de asociación
+# ----------------------------
+
+# 1.1 Spearman (num-num)
+assoc_num_num <- function(x, y) {
+  suppressWarnings(suppressMessages(
+    cor(x, y, use = "pairwise.complete.obs", method = "spearman")
+  ))
+}
+
+# 1.2 V de Cramér corregida (cat-cat)
+# Implementación robusta con corrección de sesgo (Bergsma 2013 / Bonett 2020 aprox.)
+cramers_v_corrected <- function(x, y) {
+  x <- as.factor(x); y <- as.factor(y)
+  tb <- table(x, y)
+  if (nrow(tb) < 2 || ncol(tb) < 2) return(NA_real_)
+  chi2 <- suppressWarnings(chisq.test(tb, correct = FALSE)$statistic)
+  n <- sum(tb)
+  r <- nrow(tb); c <- ncol(tb)
+  phi2 <- chi2 / n
+  phi2_corr <- max(0, phi2 - ((r - 1)*(c - 1)) / (n - 1))
+  r_corr <- r - ((r - 1)^2) / (n - 1)
+  c_corr <- c - ((c - 1)^2) / (n - 1)
+  v <- sqrt(phi2_corr / max(1, min(r_corr - 1, c_corr - 1)))
+  as.numeric(v)
+}
+
+# 1.3 η² (correlation ratio) para num-cat
+eta_squared_num_cat <- function(num, cat) {
+  cat <- as.factor(cat)
+  ok <- is.finite(num) & !is.na(cat)
+  num <- num[ok]; cat <- cat[ok]
+  if (length(num) < 3 || nlevels(cat) < 2) return(NA_real_)
+  grand_mean <- mean(num)
+  ss_total <- sum((num - grand_mean)^2)
+  if (ss_total <= 0) return(NA_real_)
+  ss_between <- sum(tapply(num, cat, function(z) length(z) * (mean(z) - grand_mean)^2))
+  eta2 <- ss_between / ss_total
+  as.numeric(eta2)
+}
+
+# ----------------------------
+# 2) Construcción de la matriz "mixta"
+# ----------------------------
+vars <- names(df)
+p <- length(vars)
+M <- matrix(NA_real_, nrow = p, ncol = p, dimnames = list(vars, vars))
+
+for (i in seq_len(p)) {
+  for (j in seq_len(p)) {
+    xi <- df[[i]]
+    xj <- df[[j]]
+    if (i == j) {
+      # Autocorrelación
+      M[i, j] <- 1
+    } else if (is_num(xi) && is_num(xj)) {
+      # num-num: Spearman (∈ [-1,1])
+      M[i, j] <- assoc_num_num(xi, xj)
+    } else if (is_cat(xi) && is_cat(xj)) {
+      # cat-cat: V de Cramér (corregida) (∈ [0,1])
+      M[i, j] <- cramers_v_corrected(xi, xj)
+    } else if (is_num(xi) && is_cat(xj)) {
+      # num-cat: η² (∈ [0,1])
+      M[i, j] <- eta_squared_num_cat(xi, xj)
+    } else if (is_cat(xi) && is_num(xj)) {
+      # cat-num: η² (∈ [0,1])
+      M[i, j] <- eta_squared_num_cat(xj, xi)
+    } else {
+      M[i, j] <- NA_real_
+    }
+  }
+}
+
+# Asegurar simetría (promedio de i,j y j,i por seguridad)
+M_sym <- (M + t(M)) / 2
+diag(M_sym) <- 1
+
+# ----------------------------
+# 3) Orden por clustering (1 - |asociación|)
+# ----------------------------
+M_abs <- abs(M_sym)
+M_abs[is.na(M_abs)] <- 0
+d <- as.dist(1 - M_abs)
+hc <- hclust(d, method = "average")
+ord <- hc$order
+M_ord <- M_sym[ord, ord, drop = FALSE]
+
+# ----------------------------
+# 4) Data frame largo para ggplot
+# ----------------------------
+mat_long <- as.data.frame(as.table(M_ord), stringsAsFactors = FALSE) %>%
+  rename(var_y = Var1, var_x = Var2, assoc = Freq) %>%
+  mutate(
+    var_y = factor(var_y, levels = rownames(M_ord)),
+    var_x = factor(var_x, levels = colnames(M_ord))
+  )
+
+# ----------------------------
+# 5) Resaltar COMPORTAMIENTO con borde negro
+# ----------------------------
+target <- "COMPORTAMIENTO"
+
+mat_long <- mat_long %>%
+  mutate(
+    vx = as.character(var_x),
+    vy = as.character(var_y),
+    highlight_border = (vx == target) | (vy == target)
+  ) %>%
+  select(-vx, -vy)
+
+# ----------------------------
+# 6) Plot estático (rojo-blanco-verde, centro en 0)
+
+# ----------------------------
+p_mix <- ggplot(mat_long, aes(x = var_x, y = var_y, fill = assoc)) +
+  geom_tile(color = NA) +
+  # Borde para fila/columna de COMPORTAMIENTO
+  geom_tile(data = subset(mat_long, highlight_border),
+            aes(x = var_x, y = var_y),
+            fill = NA, color = "black", size = 0.5) +
+  scale_fill_gradient2(
+    low = "#B71C1C",    # rojo (negativo)
+    mid = "white",      # 0
+    high = "#1B5E20",   # verde (positivo)
+    midpoint = 0,
+    limits = c(-1, 1),
+    na.value = "grey90",
+    name = "Asociación"
+  ) +
+  labs(
+    title = "Mapa de Asociación Mixto",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+# ---- Muestra el gráfico ----
+print(p_mix)
+```
+
+```{r}
+# ============================
+# Tabla de asociaciones fuertes (sin p-values)
+# ============================
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(stringr)
+})
+
+# Detectores (mismos que en el mapa)
+is_num <- function(x) is.numeric(x) || is.integer(x)
+is_cat <- function(x) is.factor(x) || is.logical(x) || is.character(x)
+
+# ---- Clasificación del tipo de par ----
+pair_type <- function(a, b, data) {
+  xa <- data[[a]]; xb <- data[[b]]
+  if (is_num(xa) && is_num(xb)) return("num–num (Spearman)")
+  if (is_cat(xa) && is_cat(xb)) return("cat–cat (V Cramér)")
+  return("num–cat (η²)")
+}
+
+# NOTA: asumimos que ya existe la matriz M_sym (simétrica) y el data.frame df
+# construidos en pasos previos del script.
+
+# ---- Pasar la matriz de asociaciones a formato largo y quedarnos con el triángulo superior ----
+assoc_long <- as.data.frame(as.table(M_sym), stringsAsFactors = FALSE) %>%
+  rename(var1 = Var1, var2 = Var2, assoc = Freq) %>%
+  filter(var1 != var2) %>%
+  mutate(abs_assoc = abs(assoc)) %>%
+  rowwise() %>%
+  mutate(v_min = min(var1, var2), v_max = max(var1, var2)) %>%
+  ungroup() %>%
+  distinct(v_min, v_max, .keep_all = TRUE)
+
+# ---- Añadir tipo de par (sin p-values) ----
+assoc_long <- assoc_long %>%
+  mutate(
+    tipo = mapply(pair_type, v_min, v_max, MoreArgs = list(data = df))
+  )
+
+# ---- Filtrar asociaciones fuertes (|asociación| ≥ 0.5) y ordenar ----
+asociaciones_fuertes <- assoc_long %>%
+  filter(abs_assoc >= 0.5) %>%
+  arrange(desc(abs_assoc)) %>%
+  transmute(
+    variable_1     = v_min,
+    variable_2     = v_max,
+    tipo,
+    asociacion     = round(assoc, 3),
+    `|asociacion|` = round(abs_assoc, 3)
+  )
+
+# ---- Ver tabla en consola ----
+print(asociaciones_fuertes, n = Inf)
+
+
+```
+
+Dentro del análisis se tiene lo siguiente:
+
+LINEACRNU – RPXLCNU (Spearman = 0.881): relación muy alta; ambas reflejan la no-utilización de la línea de crédito (casi información redundante).
+
+AVALUO – RENTA (0.860): mayor renta se asocia fuertemente con mayor avalúo de bienes.
+
+TDOC – TMOT_12 (0.820): más documentos en BC se vinculan a mayores montos en IF a 12 meses (actividad/intensidad crediticia).
+
+NUM_MOR_12 – NUM_VIG_12 (0.767): más meses con deuda vigente coocurren con más meses morosos (mayor exposición ↔ mayor probabilidad de eventos de mora).
+
+NUM_VIG_12 – RPXDCON (0.741): más meses con deuda vigente se asocian a mayor relación de deuda de consumo prom./máx.
+
+EST_CIVIL – TIPO_NAC (V de Cramér = 0.695): dependencia moderada entre ambas categorías.
+
+NUM_VIG_12 – RPXLCNU (0.592): mayor vigencia ligada a mayor proporción de línea no utilizada.
+
+NUM_MOR_12 – RPXDCON (0.592): mayor morosidad con mayor relación de deuda de consumo.
+
+EDAD – NDIR (0.524): a mayor edad, más direcciones registradas (trayectoria residencial).
+
+LINEACRNU – NUM_VIG_12 (0.521): más línea de crédito no utilizada con más meses vigentes.
+
+Es importante tener en cuenta estas relaciones, para generar un modelo predictivo parsimonioso, en el cual estas variables no aportarán información suficiente.
+
+
+Ahora también se visualizarán las 10 variables que tienen una asociación mayor con la variable objetivo "Comportamiento"
+
+```{r}
+# -------------------------------------------
+# Top 10 variables más asociadas a COMPORTAMIENTO (sin p-values)
+# (usa el assoc_long ya creado con tu matriz M_sym)
+# -------------------------------------------
+
+# Asegura que COMPORTAMIENTO sea categórica (por si acaso)
+df <- df %>%
+  mutate(COMPORTAMIENTO = as.factor(COMPORTAMIENTO))
+
+top10_comportamiento <- assoc_long %>%
+  # Nos quedamos con los pares que incluyen a COMPORTAMIENTO
+  filter(v_min == "COMPORTAMIENTO" | v_max == "COMPORTAMIENTO") %>%
+  # Variable compañera (la que NO es COMPORTAMIENTO)
+  mutate(variable = ifelse(v_min == "COMPORTAMIENTO", v_max, v_min)) %>%
+  # Ordenar por |asociación| y tomar las 10 mayores
+  arrange(desc(abs_assoc)) %>%
+  slice_head(n = 10) %>%
+  transmute(
+    variable,                               # nombre de la variable relacionada
+    tipo,                                   # tipo de par según pair_type
+    asociacion     = round(assoc, 3),       # signo y magnitud
+    `|asociacion|` = round(abs_assoc, 3)    # magnitud absoluta
+  )
+
+print(top10_comportamiento, n = Inf)
+
+# Vector para modelado / EDA focalizado:
+vars_top10 <- top10_comportamiento$variable
+
+
+```
+
+VC_CAS – Comportamiento (V de Cramér = 0.353):
+Tener ≥1 mes con deuda vencida/castigada en 12 meses se asocia con mayor prevalencia de MALO; es el indicador con mayor capacidad discriminante del grupo.
+
+IND_BC – Comportamiento (0.298):
+Un BC positivo se vincula a peor desempeño crediticio; su efecto es relevante y consistente con los mapas de prevalencia.
+
+IND_IF – Comportamiento (0.245):
+Actividad/alerta en IF en los últimos 6 meses se relaciona con mayor probabilidad de MALO, aunque con tamaño de efecto moderado.
+
+RPXDCON – Comportamiento (η² = 0.171):
+A mayor relación de deuda de consumo (prom./máx.), mayor prevalencia de MALO observada en los gráficos; explica una fracción apreciable de la varianza.
+
+NUM_VIG_12 – Comportamiento (η² = 0.118):
+Más meses con deuda vigente se asocian a mayor riesgo de MALO, con efecto pequeño-moderado.
+
+NUM_MOR_12 – Comportamiento (η² = 0.101):
+Mayor número de meses morosos en 12 meses incrementa la probabilidad de MALO; efecto en el límite de moderado.
+
+VER_DOM – Comportamiento (0.095):
+La verificación de domicilio en 2 años muestra asociación débil: ausencia de verificación tiende a concentrar más MALO.
+
+VER_TRA – Comportamiento (0.082):
+La verificación de trabajo también se asocia débilmente: no verificado se vincula con peor comportamiento.
+
+SEXO – Comportamiento (0.054):
+Efecto muy pequeño; se apreció leve mayor proporción de BUENO en mujeres, pero con escasa capacidad discriminante individual.
+
+EST_CIVIL – Comportamiento (0.052):
+Asociación muy débil; diferencias por estado civil existen pero no son marcadas en términos de tamaño de efecto.
+
+
+```{r}
+# Mapa de prevalencia (tile heatmap)
+
+suppressPackageStartupMessages({
+  library(dplyr); library(ggplot2); library(forcats)
+})
+
+# --------- Helper: binning seguro ---------
+bin_var <- function(x, n_bins = 10, top_n_levels = 15, other_label = "Otros") {
+  if (is.numeric(x) || is.integer(x)) {
+    probs <- seq(0, 1, length.out = n_bins + 1)
+    brks  <- unique(quantile(x, probs = probs, na.rm = TRUE, type = 7))
+    if (length(brks) <= 2) {
+      return(factor(x))
+    } else {
+      return(cut(x, breaks = brks, include.lowest = TRUE, dig.lab = 7))
+    }
+  } else {
+    x_fac <- fct_explicit_na(factor(x), na_level = "NA (faltante)")
+    x_fac <- fct_lump_n(x_fac, n = top_n_levels, other_level = other_label)
+    return(x_fac)
+  }
+}
+
+# --------- Función principal ---------
+plot_prevalence_tile <- function(data,
+                                 x_var, y_var,
+                                 target = "COMPORTAMIENTO",
+                                 positive = "MALO",
+                                 bins_x = 10, bins_y = 10,
+                                 top_n_x = 20, top_n_y = 20,
+                                 min_count_label = 50,
+                                 palette_low  = "#1B5E20",
+                                 palette_mid  = "white",
+                                 palette_high = "#B71C1C") {
+  stopifnot(all(c(x_var, y_var, target) %in% names(data)))
+
+  df <- data %>%
+    select(all_of(c(x_var, y_var, target))) %>%
+    filter(!is.na(.data[[target]]))
+
+  bx <- bin_var(df[[x_var]], n_bins = bins_x, top_n_levels = top_n_x)
+  by <- bin_var(df[[y_var]], n_bins = bins_y, top_n_levels = top_n_y)
+
+  df_b <- df %>%
+    mutate(
+      Xb = bx,
+      Yb = by,
+      y_target = .data[[target]] == positive
+    ) %>%
+    filter(!is.na(Xb), !is.na(Yb))
+
+  agg <- df_b %>%
+    group_by(Xb, Yb) %>%
+    summarise(
+      n = n(),
+      prev = mean(y_target, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  prev_global <- mean(df_b$y_target, na.rm = TRUE)
+
+  agg <- agg %>%
+    mutate(label_n = ifelse(n >= min_count_label, paste0("n=", n), ""))
+
+  gg <- ggplot(agg, aes(x = Xb, y = Yb, fill = prev)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+    geom_text(aes(label = label_n), size = 3, color = "grey20") +
+    scale_fill_gradient2(
+      low = palette_low, mid = palette_mid, high = palette_high,
+      midpoint = prev_global, limits = c(0, 1),
+      name = paste0("Pr(", positive, ")")
+    ) +
+    labs(
+      title = paste0("Prevalencia de ", positive, " por ", y_var, " vs ", x_var),
+      subtitle = paste0("Blanco = prevalencia global (", sprintf("%.1f%%", 100*prev_global), ")"),
+      x = x_var, y = y_var
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+
+  return(gg)
+}
+
+# =======================
+# 5 COMBINACIONES CONCRETAS
+# =======================
+
+# 1) Capacidad de pago × exposición: RENTA × NUM_VIG_12
+g1 <- plot_prevalence_tile(
+  data = scoring,
+  x_var = "RENTA",
+  y_var = "NUM_VIG_12",
+  bins_x = 10,  # deciles de renta
+  bins_y = 12,  # hasta 12 meses
+  min_count_label = 80
+)
+print(g1)
+
+# 2) Capacidad de pago × señal de buró: RENTA × IND_BC
+g2 <- plot_prevalence_tile(
+  data = scoring,
+  x_var = "RENTA",
+  y_var = "IND_BC",
+  bins_x = 10,
+  top_n_y = 10,
+  min_count_label = 80
+)
+print(g2)
+
+# 3) Historial de mora × utilización de consumo: NUM_MOR_12 × RPXDCON
+g3 <- plot_prevalence_tile(
+  data = scoring,
+  x_var = "NUM_MOR_12",
+  y_var = "RPXDCON",
+  bins_x = 12,   # meses morosos 0–12
+  bins_y = 10,   # deciles del ratio
+  min_count_label = 60
+)
+print(g3)
+
+# 4) Vencida/castigada × exposición: VC_CAS × NUM_VIG_12
+g4 <- plot_prevalence_tile(
+  data = scoring,
+  x_var = "VC_CAS",
+  y_var = "NUM_VIG_12",
+  top_n_x = 5,   # VC_CAS es 0/1
+  bins_y = 12,
+  min_count_label = 60
+)
+print(g4)
+
+# 5) Intensidad documental × monto IF 12m: TDOC × TMOT_12
+g5 <- plot_prevalence_tile(
+  data = scoring,
+  x_var = "TDOC",
+  y_var = "TMOT_12",
+  bins_x = 10,
+  bins_y = 10,
+  min_count_label = 60
+)
+print(g5)
+
+```
+
+
+
+- RENTA × NUM_VIG_12
+
+Cruza Renta con exposición (meses con deuda vigente).
+
+
+En clientes con más de 3 meses de deuda vigente (NUM_VIG_12 > 3), la prevalencia de MALO es alta en casi todos los tramos de renta, sin diferencias marcadas. En cambio, con vigencia baja, la proporción de MALO se mantiene bajo la media global. Esto indica que la consideración de deudas vigentes es un mejor predictor que la renta para el desempeño crediticio.
+
+- RENTA × IND_BC
+
+La prevalencia de comportamiento MALO es mayor en clientes con indicador positivo en el Boletín Comercial (IND_BC = 1) y rentas bajas a medias. En rentas altas, la prevalencia tiende a igualarse o disminuir levemente. Tener en cuenta que IND_BC mantiene valor predictivo fuerte, especialmente en segmentos de menores ingresos.
+
+- NUM_MOR_12 × RPXDCON
+
+Evalúa si la historia de morosidad y la utilización de deuda de consumo se potencian.
+
+Se observa una prevalencia de MALO muy alta en todos los rangos de ambas variables. La única caracterización en donde se refleja un comportamiento bueno es cuando ambas variables tienen valores muy bajos (cercanos a 0).
+
+- VC_CAS × NUM_VIG_12
+
+Si con VC_CAS = 1 el riesgo se dispara incluso con pocos meses vigentes, conviene una penalización fuerte.
+
+Los clientes con más meses de deuda vigente (>3) y al menos un mes con deuda vencida o castigada (VC_CAS = 1) presentan la mayor prevalencia de MALO (>70%). En cambio, quienes mantienen poca vigencia y sin castigos se concentran bajo la media. El historial de mora y vigencia prolongada son fuertes predictores de mal comportamiento.
+
+- TDOC × TMOT_12
+
+A medida que aumentan tanto el número de documentos (TDOC) como el monto informado en instituciones financieras a 12 meses (TMOT_12), crece la prevalencia de clientes MALO. Las celdas superiores derechas, de color rojo intenso, indican que mayor actividad y montos crediticios se asocian con peor desempeño crediticio. Por otra parte, niveles bajos de ambas variables no logran discriminar un comportamiento claro.
+
+
+# **Modelo para comportamiento**
+
+Al tener los registros limpios, completos y validos. Se requiere un modelo para clasificar de forma robusta el comportamiento económico de un cliente. Para esto, se utilizarán técnicas para seleccionar variables optimas como forward, stepwise y backward. Sin embargo, se realizará una selección de variables de manera manual, según las diferencias y asociaciones que presenten los comportamiento con las variables.
+
+## **Modelo de regresión logística con selección manual de variables**
+
+### **Selección de variables**
+
+Para la selección de variables, visualizamos rápidamente las variables numéricas que puedan tener influencia en los comportamientos del cliente.
+
+```{r}
+# --- PASO 1: CARGAR LAS LIBRERÍAS ---
+library(plotly)
+library(dplyr)
+
+# --- PASO 2: SEPARAR LAS VARIABLES NUMÉRICAS Y CATEGÓRICAS ---
+# Aseguramos que COMPORTAMIENTO sea factor (si viene 0/1 o character).
+if ("COMPORTAMIENTO" %in% names(scoring)) {
+  if (is.numeric(scoring$COMPORTAMIENTO) &&
+      all(sort(unique(na.omit(scoring$COMPORTAMIENTO))) %in% c(0,1))) {
+    scoring$COMPORTAMIENTO <- factor(scoring$COMPORTAMIENTO, levels = c(0,1))
+  } else {
+    scoring$COMPORTAMIENTO <- as.factor(scoring$COMPORTAMIENTO)
+  }
+}
+
+scoring_categoricas <- scoring %>%
+  dplyr::select(where(~ !is.numeric(.)))  # NO numéricas
+
+scoring_numericas <- scoring %>%
+  dplyr::select(where(is.numeric))        # Solo numéricas
+
+# Creamos grupo etario a partir de EDAD (si existe)
+if ("EDAD" %in% names(scoring_numericas)) {
+  scoring_numericas <- scoring_numericas %>%
+    mutate(etario = dplyr::case_when(
+      EDAD >= 17 & EDAD <= 29 ~ "17-29",
+      EDAD >= 30 & EDAD <= 40 ~ "30-40",
+      EDAD >= 41 & EDAD <= 49 ~ "41-49",
+      EDAD >= 50              ~ "50+",
+      TRUE ~ NA_character_
+    ))
+  scoring_categoricas$etario <- scoring_numericas$etario
+}
+
+# --- PASO 3: CREAR LOS BOTONES PARA CADA MENÚ ---
+botones_x <- lapply(names(scoring_categoricas), function(var_x) {
+  list(
+    method = "restyle",
+    label = var_x,
+    args = list(
+      list(x = list(scoring_categoricas[[var_x]])),
+      list(xaxis = list(title = var_x))
+    )
+  )
+})
+
+botones_y <- lapply(names(scoring_numericas), function(var_y) {
+  list(
+    method = "restyle",
+    label = var_y,
+    args = list(
+      list(y = list(scoring_numericas[[var_y]])),
+      list(yaxis = list(title = var_y))
+    )
+  )
+})
+
+# --- PASO 4: GRÁFICO INICIAL (por defecto X = COMPORTAMIENTO si existe) ---
+default_x <- if ("COMPORTAMIENTO" %in% names(scoring_categoricas)) "COMPORTAMIENTO" else names(scoring_categoricas)[1]
+default_y <- names(scoring_numericas)[1]
+
+p <- plot_ly(
+  x = scoring_categoricas[[default_x]],
+  y = scoring_numericas[[default_y]],
+  type = "box"
+) %>%
+  layout(
+    title = "Boxplot Bivariado Interactivo (COMPORTAMIENTO como X por defecto)",
+    xaxis = list(title = default_x),
+    yaxis = list(title = default_y),
+    updatemenus = list(
+      list(type = "dropdown", buttons = botones_y, x = 0.05, y = 1.05),
+      list(type = "dropdown", buttons = botones_x, x = 0.25, y = 1.05)
+    )
+  )
+
+# --- PASO 5: MOSTRAR EL GRÁFICO ---
+p
+
+```
+
+Ahora evaluaremos la relación entre las variables categóricas independientes y la variable dependiente COMPORTAMIENTO. Aplicamos Chi-cuadrado de independencia; cuando haya asociación significativa, reportamos V de Cramér.
+
+```{r}
+library(dplyr)
+
+# Vista previa (opcional)
+if ("COMPORTAMIENTO" %in% names(scoring)) {
+  print(table(scoring$COMPORTAMIENTO, useNA = "ifany"))
+}
+
+# Unificar tokens tipo "na"/"nA" a NA real (si existieran)
+recode_missing_tokens <- function(x, tokens = c("na","n/a","<na>","nA","null","none",
+                                                "sin dato","sin datos","no informado",
+                                                "sd","s/d","","-",".")) {
+  was_factor <- is.factor(x)
+  x_chr <- as.character(x)
+  x_chr <- trimws(x_chr)
+  is_miss <- is.na(x_chr) | tolower(x_chr) %in% tokens
+  x_chr[is_miss] <- NA
+  if (was_factor) factor(x_chr) else x_chr
+}
+
+if ("COMPORTAMIENTO" %in% names(scoring)) {
+  scoring <- scoring %>%
+    mutate(COMPORTAMIENTO = recode_missing_tokens(COMPORTAMIENTO),
+           COMPORTAMIENTO = droplevels(factor(COMPORTAMIENTO)))
+}
+
+# Filtrar a casos con COMPORTAMIENTO observado
+scoring_sin_na <- scoring %>% filter(!is.na(COMPORTAMIENTO)) %>%
+  mutate(across(where(is.factor), droplevels))
+
+# ---- Chi-cuadrado + V de Cramér vs COMPORTAMIENTO ----
+chi_cramer_simple <- function(df, target = "COMPORTAMIENTO", alpha = 0.05,
+                              max_levels = 15, include_na = TRUE) {
+  stopifnot(target %in% names(df))
+  n_uniq <- function(x) length(unique(x[!is.na(x)]))
+  is_cat <- function(x) is.factor(x) || is.character(x) || (is.numeric(x) && n_uniq(x) <= max_levels)
+
+  cat_vars <- names(df)[vapply(df, is_cat, logical(1))]
+  cat_vars <- setdiff(cat_vars, target)
+
+  results <- lapply(cat_vars, function(v) {
+    g <- as.factor(df[[target]])
+    x <- as.factor(df[[v]])
+
+    useNA_opt <- if (include_na) "ifany" else "no"
+    tb <- table(g, x, useNA = useNA_opt)
+    tb <- tb[rowSums(tb) > 0, , drop = FALSE]
+    tb <- tb[, colSums(tb) > 0, drop = FALSE]
+
+    if (nrow(tb) < 2 || ncol(tb) < 2) {
+      return(data.frame(variable = v, p_value = NA_real_, df = NA_real_, n = sum(tb),
+                        cramer_v = NA_real_, significant = FALSE, stringsAsFactors = FALSE))
+    }
+
+    ch <- suppressWarnings(chisq.test(tb))
+    p  <- ch$p.value
+    n  <- sum(tb); r <- nrow(tb); c <- ncol(tb)
+    vC <- if (!is.na(p) && p < alpha) sqrt(as.numeric(ch$statistic) / (n * (min(r - 1, c - 1)))) else NA_real_
+
+    data.frame(variable = v, p_value = round(p,4), df = as.numeric(ch$parameter), n = n,
+               cramer_v = vC, significant = !is.na(p) && p < alpha, stringsAsFactors = FALSE)
+  })
+
+  out <- do.call(rbind, results)
+  out[order(out$p_value), , drop = FALSE]
+}
+
+res_chi <- chi_cramer_simple(scoring_sin_na, target = "COMPORTAMIENTO",
+                             alpha = 0.05, max_levels = 15, include_na = TRUE)
+
+# Asociaciones significativas con su V de Cramér
+subset(res_chi, significant)
+
+
+```
+
+En este caso todas las variables presentan diferencias significativas al segmentarlas por COMPORTAMIENTO, aunque es importante tener en cuenta que esta significacia puede estar dada por la alta cantidad de observaciones. Para esto, solo incluíremos en el modelo aquellas presentan un V de cramer con una asociación \> 0.20. (NUM_VIG_12, NUM_MOR_12, VC_CAS, IND_BC e IND_IF)
+
+Para cuantitativas vs COMPORTAMIENTO usamos Kruskal–Wallis (generaliza y cubre el caso binario también). Reportamos tamaño de efecto (epsilon-squared) y BH para múltiples pruebas.
+
+```{r}
+library(dplyr)
+
+kw_todas_vs_target <- function(df, target = "COMPORTAMIENTO", alpha = 0.05, min_n = 10) {
+  stopifnot(target %in% names(df))
+  df[[target]] <- as.factor(df[[target]])
+  df <- df[!is.na(df[[target]]), , drop = FALSE]
+
+  es_num <- vapply(df, function(x) is.numeric(x) || is.integer(x), logical(1))
+  num_vars <- setdiff(names(df)[es_num], target)
+
+  res <- lapply(num_vars, function(v) {
+    dat <- df[, c(target, v)]
+    dat <- dat[is.finite(dat[[v]]) & !is.na(dat[[target]]), , drop = FALSE]
+
+    k <- nlevels(dat[[target]])
+    if (nrow(dat) < min_n || k < 2) return(NULL)
+
+    kw <- suppressWarnings(kruskal.test(dat[[v]] ~ dat[[target]]))
+    H  <- as.numeric(kw$statistic)
+    df1 <- as.numeric(kw$parameter)  # = k - 1
+    p  <- kw$p.value
+    n  <- nrow(dat)
+
+    eps2 <- if (n > k) (H - k + 1) / (n - k) else NA_real_
+    efecto_cls <- dplyr::case_when(
+      is.na(eps2)        ~ NA_character_,
+      eps2 < 0.01        ~ "<0.01 (muy pequeño)",
+      eps2 < 0.06        ~ "pequeño (~0.01)",
+      eps2 < 0.14        ~ "mediano (~0.06)",
+      TRUE               ~ "grande (≥0.14)"
+    )
+
+    data.frame(
+      variable = v, n = n, grupos = k, H = H, df = df1, p_value = round(p,4),
+      epsilon2 = eps2, efecto = efecto_cls, significativo = !is.na(p) && p < alpha,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  out <- do.call(rbind, res)
+  if (is.null(out) || nrow(out) == 0) return(out)
+  out$p_adj_BH <- p.adjust(out$p_value, method = "BH")
+  out <- out[order(out$p_value), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+res_kw <- kw_todas_vs_target(scoring_sin_na, target = "COMPORTAMIENTO", alpha = 0.05)
+
+# Solo significativas (p < 0.05)
+subset(res_kw, significativo)
+
+
+```
+
+En este caso ocurre lo mismo, en todas se encuentran diferencias. Sin embargo, en ninguna de ellas se presenta una asociación alta. Cada una de ellas mantienen un epsilon2 realmente bajo, lo que nos sugiere que la fuerza de asociación entre las variables numéricas al separarlas por categorías de COMPORTAMIENTO es baja al no haber suficiente variabilidad que las diferencie.
+
+Es por esto que las variables seleccionadas manualmente son: NUM_VIG_12, NUM_MOR_12, VC_CAS, IND_BC, IND_IF y RPXDCON.
+
+Se realizó la selección de variables, donde se planteará el modelo de regresión logística con estas variables. Sin embargo, aún es necesario comprobar multicolinealidad (o correlación entre estas variables)
+
+```{r}
+scoring_modelo <- scoring[, c("COMPORTAMIENTO", "VC_CAS", "IND_BC", "RPXDCON", "IND_IF")]
+
+names(scoring_modelo)
+```
+
+Es importante considerar que en modelos de regresión, es ideal que las variables no tengan multicolinealidad, para un análisis más robusto. Es por esto, teniendo en cuenta el EDA realizado anteriormente, se elimina la variable "NUM_MOR_12", la cual tiene una correlación positiva alta con "NUM_VIG_12". Por otra parte ambas variables tienen una relación alta con la "RPXDCON", asociación significativa, mayor a 0,5. Por lo tanto, con el fin de que las variables no presenten relaciones entre ellas, se utilizaron las siguientes:
+
+
+
+VC_CAS: Indicador de 1+ meses en los ultimos 12 meses con deuda vencida o castigada.
+
+IND_BC: Indicador del BC en los ultimos 6 meses.
+
+IND_IF: Indicador del IF en los ultimos 6 meses.
+
+RPXDCON:	Relacion de deuda consumo prom a max.
+
+Deseamos analizar primeramente la multicolinealidad que presentan en un modelo de regresión logística mediante el VIF (Valor de Inflación de la Varianza).
+
+```{r}
+# =============================
+# VIF para: VC_CAS, IND_BC, RPXDCON, IND_IF
+# Outcome: COMPORTAMIENTO
+# =============================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(car)
+})
+
+# Asegurar clases correctas
+scoring_modelo <- scoring[, c("COMPORTAMIENTO", "VC_CAS", "IND_BC", "RPXDCON", "IND_IF")] %>%
+  mutate(
+    COMPORTAMIENTO = as.factor(COMPORTAMIENTO),
+    VC_CAS = as.factor(VC_CAS),
+    IND_BC = as.factor(IND_BC),
+    IND_IF = as.factor(IND_IF),
+    RPXDCON = as.numeric(RPXDCON)
+  )
+
+# Modelo logístico base para evaluar multicolinealidad
+fit_vif <- glm(
+  COMPORTAMIENTO ~ VC_CAS + IND_BC + RPXDCON + IND_IF,
+  data = scoring_modelo,
+  family = binomial(),
+  na.action = na.omit
+)
+
+# Calcular VIF o GVIF ajustado
+v <- car::vif(fit_vif)
+
+vif_tab <- if (is.matrix(v)) {
+  tibble::tibble(
+    variable = rownames(v),
+    GVIF = as.numeric(v[, "GVIF"]),
+    Df = as.numeric(v[, "Df"]),
+    GVIF_adj = as.numeric(v[, "GVIF^(1/(2*Df))"])
+  ) %>%
+    arrange(desc(GVIF_adj))
+} else {
+  tibble::tibble(
+    variable = names(v),
+    VIF = as.numeric(v)
+  ) %>%
+    arrange(desc(VIF))
+}
+
+print(vif_tab, n = Inf)
+
+```
+
+Logramos notar que los valores VIF son demasiado bajos, reafirmando una buena selección de variables
+
+
+Ajustamos el tipo de variable según lo requiera cada una, resultando el siguiente dataframe:
+
+```{r}
+# 1. VARIABLE DEPENDIENTE: Convertir a factor y establecer "BUENO" como referencia
+# Esto es importante para que el modelo prediga la probabilidad de ser "MALO"
+scoring$COMPORTAMIENTO <- as.factor(scoring$COMPORTAMIENTO)
+scoring$COMPORTAMIENTO <- relevel(scoring$COMPORTAMIENTO, ref = "BUENO")
+
+
+# 2. VARIABLES PREDICTORAS CATEGÓRICAS: Convertir a factor
+# Lista de columnas categóricas según nuestro análisis
+columnas_categoricas <- c("VC_CAS", "IND_BC", "IND_IF")
+
+scoring_modelo[columnas_categoricas] <- lapply(scoring_modelo[columnas_categoricas], as.factor)
+
+
+
+# Verificamos la estructura final para asegurarnos de que todo está correcto
+str(scoring_modelo)
+head(scoring_modelo)
+```
+
+Ya listas las variables a utilizar, se define el modelo de regresión logística.
+
+### **Ajuste del modelo de regresión logística**
+
+```{r}
+# Paquetes útiles
+library(dplyr)
+library(broom)
+
+# 0) Subset y limpieza mínima
+datos <- scoring_modelo %>%
+  select(COMPORTAMIENTO,  VC_CAS, IND_BC, RPXDCON, IND_IF) %>%
+  filter(!is.na(COMPORTAMIENTO))  # evita problemas con el factor
+
+# 1) Asegura la codificación del objetivo (referencia = "BUENO")
+#    => el modelo estima P(MALO); los coeficientes > 0 aumentan odds de "MALO"
+datos <- datos %>%
+  mutate(COMPORTAMIENTO = factor(COMPORTAMIENTO, levels = c("BUENO","MALO")))
+
+# 2) Ajuste del modelo logístico
+modelo_seleccion <- glm(
+  COMPORTAMIENTO ~ VC_CAS + IND_BC+ RPXDCON + IND_IF,
+  data   = datos,
+  family = binomial(link = "logit"),
+  na.action = na.omit
+)
+
+# 3) Resumen del modelo (coeficientes en escala log-odds)
+summary(modelo_seleccion)
+
+# 4) Coeficientes "bonitos": log-odds + OR y CI
+tab_coef <- tidy(modelo_seleccion, conf.int = TRUE, conf.level = 0.95) %>%
+  mutate(
+    odds_ratio = exp(estimate),
+    OR_low     = exp(conf.low),
+    OR_high    = exp(conf.low + (conf.high - conf.low)) # o exp(conf.high)
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value, odds_ratio, OR_low, OR_high)
+
+tab_coef
+
+# (Opcional) Métricas rápidas de ajuste
+n <- nobs(modelo_seleccion)
+null_dev <- modelo_seleccion$null.deviance
+res_dev  <- modelo_seleccion$deviance
+AIC_val  <- AIC(modelo_seleccion)
+mcFadden <- 1 - (res_dev / null_dev)
+
+cat(sprintf("\nN = %d\nNull deviance = %.3f\nResidual deviance = %.3f\nAIC = %.3f\nMcFadden pseudo-R2 = %.3f\n",
+            n, null_dev, res_dev, AIC_val, mcFadden))
+
+```
+
+Viendo el modelo y su resumen nos podemos dar cuenta que cada una de las variables resultan ser significativamente distintas de 0 (nivel de significación 0.05) para clasificar el comportamiento de los clientes. Por lo que la selección de variables para esta clasificación resultó efectiva. Ahora, se revisarán las métricas que nos entregarán una primera vista al rendimiento de este modelo. El modelo resultante sería el siguiente.
+
+$$
+\log\left( \frac{P(\text{MALO})}{1 - P(\text{MALO})} \right)
+= -1.1155 + 1.018 \cdot \text{VC_CAS}_1 + 1.202\cdot \text{IND_BC}_1+1.3961\cdot \text{RPXDCON} + 1.233 \cdot \text{IND_IF}_1
+$$
+
+\noindent Donde:
+
+\begin{itemize}
+  \item $P(\text{MALO})$: Probabilidad de que el comportamiento sea "MALO".
+  \item $\text{VC\_CAS}_1$: Variable dummy (1 si pertenece a grupo de 1+ meses en los últimos 12 meses con deuda vencida o castigada)
+  \item $\text{IND\_BC}_1$: Variable dummy (1 si pertenece al grupo BC).
+  \item $\text{IND\_IF}_1$: Variable dummy (1 si pertenece al grupo IF).
+  \item $\text{RPXDCON}$:	Relación de deuda de consumo prom a max
+\end{itemize}
+
+### **Resumen y métricas del modelo**
+
+Las métricas obtenidas del modelo anterior son las siguientes.
+
+```{r}
+# Carga las librerías
+library(pROC)
+library(caret)
+
+# Curvas ROC para cada modelo
+roc_seleccion <- roc(scoring_modelo$COMPORTAMIENTO, predict(modelo_seleccion, type = "response"))
+
+
+
+# Encontrar las coordenadas del mejor punto de corte
+coordenadas_optimas <- coords(roc_seleccion, "best", ret = "all", best.method = "closest.topleft")
+
+# Extraer el punto de corte (threshold)
+punto_corte_optimo <- coordenadas_optimas$threshold
+# Función para calcular y mostrar métricas
+calcular_metricas <- function(modelo, datos, punto_corte) {
+  # Predecir probabilidades
+  probabilidades <- predict(modelo, newdata = datos, type = "response")
+  
+  # Clasificar usando el punto de corte
+  predicciones <- ifelse(probabilidades > punto_corte, "MALO", "BUENO")
+  predicciones <- as.factor(predicciones)
+  
+  # Calcular la matriz de confusión
+  matriz_confusion <- confusionMatrix(predicciones, datos$COMPORTAMIENTO)
+  
+  # Calcular AUC
+  roc_obj <- roc(datos$COMPORTAMIENTO, probabilidades, quiet = TRUE)
+  auc_valor <- auc(roc_obj)
+  
+  # Devolver un data frame con las métricas clave
+  metricas <- data.frame(
+    Modelo = deparse(substitute(modelo)),
+    AUC = auc_valor,
+    Accuracy = matriz_confusion$overall['Accuracy'],
+    Sensitivity = matriz_confusion$byClass['Sensitivity'],
+    Specificity = matriz_confusion$byClass['Specificity'],
+    Precision = matriz_confusion$byClass['Precision'],
+    F1 = matriz_confusion$byClass['F1']
+  )
+  return(metricas)
+}
+
+# Aplicar la función a cada modelo usando el punto de corte que optimizamos
+metricas_seleccion <- calcular_metricas(modelo_seleccion, scoring_modelo, punto_corte_optimo)
+
+
+# Unir todo en una sola tabla para comparar
+tabla_comparativa <- rbind(metricas_seleccion)
+rownames(tabla_comparativa) <- NULL # Limpiar los nombres de las filas
+
+# Mostrar la tabla comparativa
+print(tabla_comparativa)
+
+```
+
+Las siguientes métricas resumen el desempeño del modelo en términos de su capacidad para clasificar correctamente los casos de comportamiento crediticio:
+
+-   AUC (0.7913): El modelo presenta buena capacidad de discriminación. En términos probabilísticos, si tomamos al azar un individuo MALO y uno BUENO, hay un 79.13% de probabilidad de que el modelo asigne un puntaje de riesgo más alto al MALO que al BUENO.
+
+-   Accuracy (0.7324): El modelo clasifica correctamente el 73.24% del total de los casos, lo que indica un buen desempeño general.
+
+-   Sensitivity (0.6879): El 68.79% de los individuos con comportamiento malo fueron correctamente identificados.
+
+-   Specificity (0.7730): El 77.3% de los individuos con comportamiento bueno fueron correctamente clasificados como tal.
+
+-   Precision (0.7341): De todas las predicciones que el modelo clasificó como comportamiento malo, el 73.41% fueron correctas.
+
+-   F1 Score (0.7102): Es la media armónica entre la precisión y el recall, indicando un buen equilibrio entre ambas.
+
+## **Modelo de regresión logística con selección de variables por Forward, Stepwise y Backward**
+
+Para analizar si la selección de variables aporta en el rendimiento del modelo, comprobaremos qué modelo nos arroja la base de datos completa, por lo que se realiza el mismo paso a paso anterior. Sin embargo, esta vez se seleccionarán las variables del modelo mediante las técnicas de selección Forward, Stepwise y Backward.
+
+```{r}
+# Cargar librerías necesarias
+library(dplyr)
+
+# 1. VARIABLE DEPENDIENTE: Convertir a factor y establecer "BUENO" como referencia
+# Esto es importante para que el modelo prediga la probabilidad de ser "MALO"
+scoring$COMPORTAMIENTO <- as.factor(scoring$COMPORTAMIENTO)
+scoring$COMPORTAMIENTO <- relevel(scoring$COMPORTAMIENTO, ref = "BUENO")
+
+# 2. VARIABLES PREDICTORAS CATEGÓRICAS: Convertir a factor
+columnas_categoricas <- c("SEXO", "TIPO_NAC", "EST_CIVIL", "VER_TRA", 
+                          "VER_DOM", "VC_CAS", "MAXUTIL", "IND_IF", "IND_BC")
+
+
+# Si no existe, este paso no es necesario, pero es una buena práctica.
+if("ID_CLIENTE" %in% names(scoring)) {
+  scoring_modelo <- scoring %>% select(-ID_CLIENTE)
+} else {
+  scoring_modelo <- scoring
+}
+
+# Modelo Nulo (solo intercepto)
+modelo_nulo <- glm(COMPORTAMIENTO ~ 1, 
+                   data = scoring_modelo, 
+                   family = binomial(link = "logit"))
+
+# Modelo Completo (con todas las variables predictoras preparadas)
+modelo_completo <- glm(COMPORTAMIENTO ~ ., 
+                       data = scoring_modelo, 
+                       family = binomial(link = "logit"))
+
+```
+
+### **Ajuste del modelo de regresión logística por Forward**
+
+```{r}
+modelo_forward <- step(
+  modelo_nulo,
+  scope = list(lower = formula(modelo_nulo), upper = formula(modelo_completo)),
+  direction = "forward",
+  trace = 0
+)
+```
+
+```{r}
+summary(modelo_forward)
+```
+
+Con la selección de variables mediante Forward, se seleccionan la mayoría de las variables, donde todas resultan ser significativamente distintas de 0 (con un nivel de significación del 0.05) excepto 4 de ellas: EST_CIVILD, EST_CIVILN, EST_CIVILV y NACR. Las 3 primeras correspondiendo a la misma variable categórica, donde, se sugiere que el estado civil no aporta significativamente a la clasificación del comportamiento, con solo una de sus categorías resultando significativa (soltero).
+
+### **Ajuste del modelo de regresión logística por Stepwise**
+
+```{r}
+modelo_stepwise <- step(
+  modelo_completo,
+  scope     = list(lower = formula(modelo_nulo), upper = formula(modelo_completo)),
+  direction = "both",
+  trace     = 0
+)
+```
+
+```{r}
+summary(modelo_stepwise)
+```
+
+Con la selección de variables mediante stepwise se seleccionan la mayoría de las variables, donde todas resultan ser significativamente distintas de 0 (con un nivel de significación del 0.05) excepto 4 de ellas: EST_CIVILD, EST_CIVILN, EST_CIVILV y NACR. Las 3 primeras correspondiendo a la misma variable categórica, donde, se sugiere que el estado civil no aporta significativamente a la clasificación del comportamiento, con solo una de sus categorías resultando significativa (soltero). Repitiendo la selección por Forward.
+
+### **Ajuste del modelo de regresión logística por Backward**
+
+```{r}
+modelo_backward <- step(modelo_completo, direction = "backward", trace = 0)
+```
+
+```{r}
+summary(modelo_backward)
+```
+
+Con la selección de variables mediante backward se seleccionan la mayoría de las variables, donde todas resultan ser significativamente distintas de 0 (con un nivel de significación del 0.05) excepto 4 de ellas: EST_CIVILD, EST_CIVILN, EST_CIVILV y NACR. Las 3 primeras correspondiendo a la misma variable categórica, donde, se sugiere que el estado civil no aporta significativamente a la clasificación del comportamiento, con solo una de sus categorías resultando significativa (soltero). Por lo tanto, los 3 métodos de selección de variables entregaron la misma selección de variables.
+
+### **Resumen y métricas del modelo Forward, Stepwise y Backward**
+
+```{r}
+
+library(pROC)
+
+# Curvas ROC para cada modelo
+roc_backward <- roc(scoring_modelo$COMPORTAMIENTO, predict(modelo_backward, type = "response"))
+roc_forward <- roc(scoring_modelo$COMPORTAMIENTO, predict(modelo_forward, type = "response"))
+roc_stepwise <- roc(scoring_modelo$COMPORTAMIENTO, predict(modelo_stepwise, type = "response"))
+
+
+
+# Encontrar las coordenadas del mejor punto de corte
+coordenadas_optimas <- coords(roc_stepwise, "best", ret = "all", best.method = "closest.topleft")
+
+# Extraer el punto de corte (threshold)
+punto_corte_optimo <- coordenadas_optimas$threshold
+# Función para calcular y mostrar métricas
+calcular_metricas <- function(modelo, datos, punto_corte) {
+  # Predecir probabilidades
+  probabilidades <- predict(modelo, newdata = datos, type = "response")
+  
+  # Clasificar usando el punto de corte
+  predicciones <- ifelse(probabilidades > punto_corte, "MALO", "BUENO")
+  predicciones <- as.factor(predicciones)
+  
+  # Calcular la matriz de confusión
+  matriz_confusion <- confusionMatrix(predicciones, datos$COMPORTAMIENTO)
+  
+  # Calcular AUC
+  roc_obj <- roc(datos$COMPORTAMIENTO, probabilidades, quiet = TRUE)
+  auc_valor <- auc(roc_obj)
+  
+  # Devolver un data frame con las métricas clave
+  metricas <- data.frame(
+    Modelo = deparse(substitute(modelo)),
+    AUC = auc_valor,
+    Accuracy = matriz_confusion$overall['Accuracy'],
+    Sensitivity = matriz_confusion$byClass['Sensitivity'],
+    Specificity = matriz_confusion$byClass['Specificity'],
+    Precision = matriz_confusion$byClass['Precision'],
+    F1 = matriz_confusion$byClass['F1']
+  )
+  return(metricas)
+}
+
+# Aplicar la función a cada modelo usando el punto de corte que optimizamos
+metricas_backward <- calcular_metricas(modelo_backward, scoring_modelo, punto_corte_optimo)
+metricas_forward <- calcular_metricas(modelo_forward, scoring_modelo, punto_corte_optimo)
+metricas_stepwise <- calcular_metricas(modelo_stepwise, scoring_modelo, punto_corte_optimo)
+
+# Unir todo en una sola tabla para comparar
+tabla_comparativa <- rbind(metricas_backward, metricas_forward, metricas_stepwise)
+rownames(tabla_comparativa) <- NULL # Limpiar los nombres de las filas
+
+
+```
+
+Las métricas de los modelos con distintos métodos de selección de variables (Forward, Stepwise y Backward) son exactamente los mismos, por lo que el modelo resultante de estos métodos asignaron los mismos pesos a estas variables del modelo. El modelo mantiene las siguientes métricas (los 3 iguales).
+
+```{r}
+library(broom)
+library(dplyr)
+
+tab_coef <- tidy(modelo_forward, conf.int = TRUE, conf.level = 0.95) %>%
+  mutate(
+    OR      = exp(estimate),
+    OR_low  = exp(conf.low),
+    OR_high = exp(conf.high)
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value, OR, OR_low, OR_high)
+
+tab_coef
+
+```
+
+Logrando las siguientes métricas.
+
+```{r}
+# Mostrar la tabla comparativa
+print(tabla_comparativa)
+```
+
+-   AUC (0.8225): El modelo presenta buena capacidad de discriminación. En términos probabilísticos, si tomamos al azar un individuo MALO y uno BUENO, hay un 82.25% de probabilidad de que el modelo asigne un puntaje de riesgo más alto al MALO que al BUENO.
+
+-   Accuracy (0.7476): El modelo clasifica correctamente el 0.7476% del total de los casos, lo que indica un buen desempeño general.
+
+-   Sensitivity (0.751): El 75.1% de los individuos con comportamiento malo fueron correctamente identificados.
+
+-   Specificity (0.7441): El 74.41% de los individuos con comportamiento bueno fueron correctamente clasificados como tal.
+
+-   Precision (0.7279): De todas las predicciones que el modelo clasificó como comportamiento malo, el 72.79% fueron correctas.
+
+-   F1 Score (0.7395): Es la media armónica entre la precisión y el recall, indicando un buen equilibrio entre ambas.
+
+## **Selección del mejor modelo de regresión multilogístico**
+
+Revisaremos las métricas del modelo ajustado por los métodos de selección forward, stepwise y backward, comparándolo con el modelo ajustado por selección de variables manual.
+
+```{r}
+# Unir todo en una sola tabla para comparar
+tabla_comparativa <- rbind(metricas_backward, metricas_seleccion)
+rownames(tabla_comparativa) <- NULL # Limpiar los nombres de las filas
+
+print(tabla_comparativa)
+
+```
+
+Todas las métricas resultan mayores en el modelo ajustado por los métodos de selección de variables (forward, stepwise y backward), excepto en especificidad y precisión, donde, es minimamente mayor en el modelo ajustado con variables seleccionadas manualmente. Sin embargo, en todo el resto es mayor, por ejemplo, el modelo de selección manual resulta menor con un AUC de 0.7913 contra el de selección por los métodos con un AUC de 0.8225. Se debe tener en cuenta que la cantidad de variables en el modelo de selección manual es de solo 4 variables. En cambio, en el modelo ajustado por las técnicas como backward es de 19 variables. Por lo que la selección manual entrega un modelo más simple y parsimonioso, y el otro ajuste uno numerosamente más complejo.
+
+```{r}
+# Paquetes (solo dplyr/tidyr para limpieza; si no los tienes, usa install.packages)
+library(dplyr)
+library(tidyr)
+
+# ---------------------------
+# 0) Datos de partida
+# ---------------------------
+df <- scoring_modelo %>%
+  mutate(COMPORTAMIENTO = factor(COMPORTAMIENTO, levels = c("BUENO","MALO")))
+
+# ---------------------------
+# 1) Definir fórmulas
+# ---------------------------
+form1 <- COMPORTAMIENTO ~ RPXDCON + VC_CAS + IND_BC + IND_IF
+
+form2 <- COMPORTAMIENTO ~ RENTA + AVALUO + SEXO + EDAD + TIPO_NAC + EST_CIVIL + 
+  NCC + VER_TRA + NDIR + VER_DOM + NACR + LINEACRNU + DDA_HIPOT + NUM_VIG_12 + 
+  NUM_MOR_12 + VC_CAS + MAXUTIL + RPXLCNU + RPXDCOM + RPXDCON + IND_IF + IND_BC + 
+  TMOT_06 + TDOC + TMOT_12 + NTCRED
+
+# ---------------------------
+# 2) Función auxiliar: split 80/20 estratificado, fit y matriz de confusión
+# ---------------------------
+fit_and_confusion <- function(data, formula, thr = 0.5) {
+  # nos quedamos solo con variables necesarias y sin NA
+  vars_needed <- all.vars(formula)
+  data_use <- data %>% select(all_of(vars_needed)) %>% drop_na()
+
+  # split 80/20 estratificado por COMPORTAMIENTO
+  set.seed(123)
+  idx_by_class <- split(seq_len(nrow(data_use)), data_use$COMPORTAMIENTO)  # lista por clase
+  train_idx <- unlist(lapply(idx_by_class, function(ix) {
+    if (length(ix) <= 1) return(ix)  # caso extremo
+    sample(ix, size = floor(0.8 * length(ix)))
+  }))
+  test_idx  <- setdiff(seq_len(nrow(data_use)), train_idx)
+
+  train <- data_use[train_idx, , drop = FALSE]
+  test  <- data_use[test_idx , , drop = FALSE]
+
+  # ajustar modelo logístico
+  fit <- glm(formula, data = train, family = binomial)
+
+  # predicción en test
+  p_malo <- predict(fit, newdata = test, type = "response")
+  pred   <- factor(ifelse(p_malo >= thr, "MALO", "BUENO"), levels = c("BUENO","MALO"))
+  truth  <- test$COMPORTAMIENTO
+
+  # matriz de confusión
+  cm <- table(Real = truth, Pred = pred)
+
+  # métricas básicas (opcionales)
+  acc <- mean(pred == truth)
+  TP  <- cm["MALO","MALO"]; TN <- cm["BUENO","BUENO"]
+  FP  <- cm["BUENO","MALO"]; FN <- cm["MALO","BUENO"]
+  sens <- if (!is.na(TP)) TP / (TP + FN) else NA_real_
+  spec <- if (!is.na(TN)) TN / (TN + FP) else NA_real_
+  prec <- if (!is.na(TP)) TP / (TP + FP) else NA_real_
+
+  list(
+    data_train_n = nrow(train),
+    data_test_n  = nrow(test),
+    fit = fit,
+    confusion_matrix = cm,
+    metrics = c(accuracy = acc, sensitivity = sens, specificity = spec, precision = prec)
+  )
+}
+
+# ---------------------------
+# 3) Ejecutar para ambos modelos
+# ---------------------------
+res1 <- fit_and_confusion(df, form1, thr = 0.5)
+res2 <- fit_and_confusion(df, form2, thr = 0.5)
+
+# ---------------------------
+# 4) Resultados
+# ---------------------------
+cat("\n=== MODELO 1 (VC_CAS, IND_BC IND_IF, y RPXDCON) ===\n")
+cat("Train n:", res1$data_train_n, " | Test n:", res1$data_test_n, "\n")
+print(res1$confusion_matrix)
+print(round(res1$metrics, 4))
+# summary(res1$fit)  # si quieres ver coeficientes
+
+cat("\n=== MODELO 2 (lista larga de predictores) ===\n")
+cat("Train n:", res2$data_train_n, " | Test n:", res2$data_test_n, "\n")
+print(res2$confusion_matrix)
+print(round(res2$metrics, 4))
+# summary(res2$fit)  # si quieres ver coeficientes
+
+```
+
+Podemos notar que en la validación (20% para validación, 80% para entrenamiento) el modelo más simple (selección manual) entrega un mejor rendimiento para la precisión del comportamiento bueno de 73.5% contra 70.97% del modelo con selección por backward, stepwise y forward. Sin embargo, la precisión del modelo simple es menor para el comportamiento malo de 73.23% contra un 79.13% del modelo más complejo. Dado el mayor aumento y diferencia de 2.53% en la clasificación correcta del comportamiento bueno del modelo con selección de variables manual, y asumiendo una perdida de precisión del 5.9% para el comportamiento malo, se preferirá este modelo, a pesar de ser más optimista. Además, reforzando este modelo, es más interpretable para la clasificación de diferentes perfiles de clientes al tener solo 4 variables. Entonces, el modelo simple es algo más optimista que el modelo pesimista (mayor precisión en comportamiento malo) que es el modelo más complejo. Ahora bien, cada uno de los dos presenta características diferentes, con métricas optimas para la clasificación, por lo que el uso de cualquiera de los dos va en la estrategia de la entidad bancaria.
+
+
+# **Verificación de predicción con distintos perfiles de clientes (al menos 5)**
+
+Como el modelo con métodos de selección mediante forward, backward y stepwise entregaron el mismo modelo, y además, contenía diversas variables e indices las cuales al definirlas, su interpretación seria confusa y con baja interpretabilidad. Se decide utilizar el modelo de selección de variables en la que se seleccionaron únicamente 4 variables ("RPXDCON"), ("VS_CAS"), ("IND_IF") y ("IND_BC"). Se definirán perfiles de clientes del banco a partir de estas 4 variables para ver el comportamiento, y como este es clasificado para el modelo con selección manual. Revisando también, la probabilidad de que este comportamiento sea MALO.
+
+Tenemos el modelo:
+
+
+$$
+\log\left( \frac{P(\text{MALO})}{1 - P(\text{MALO})} \right)
+= -1.1155 + 1.018 \cdot \text{VC_CAS}_1 + 1.202\cdot \text{IND_BC}_1+1.3961\cdot \text{RPXDCON} + 1.233 \cdot \text{IND_IF}_1
+$$
+
+\noindent Donde:
+
+\begin{itemize}
+  \item $P(\text{MALO})$: Probabilidad de que el comportamiento sea "MALO".
+  \item $\text{VC\_CAS}_1$: Variable dummy (1 si pertenece a grupo de 1+ meses en los últimos 12 meses con deuda vencida o castigada)
+  \item $\text{IND\_BC}_1$: Variable dummy (1 si pertenece al grupo BC).
+  \item $\text{IND\_IF}_1$: Variable dummy (1 si pertenece al grupo IF).
+  \item $\text{RPXDCON}$:	Relación de deuda de consumo prom a max
+\end{itemize}
+
+```{r}
+
+
+library(dplyr)
+library(gt)
+library(scales)
+# ==========================================================
+
+# Perfil 1: Con deuda castigada, sin indicador BC, sin indicador IF y sin relación de deuda de consumo
+perfil_1 <- c(VC_CAS = "1", IND_BC = "0", RPXDCON = 0, IND_IF = "0")
+
+# Perfil 2: Sin deuda castigada, sin indicador BC, sin indicador IF y con relación de deuda de consumo de 0.5
+perfil_2 <- c(VC_CAS = "0", IND_BC = "0", RPXDCON = 0.5, IND_IF = "0")
+
+# Perfil 3: Con deuda castigada, con indicador BC, con indicador IF y con relación de deuda de consumo maxima (1)
+perfil_3 <- c(VC_CAS = "1", IND_BC = "1", RPXDCON = 1, IND_IF = "1")
+
+# Perfil 4: Sin deuda castigada, sin indicador BC, sin indicador IF y sin relación de deuda de consumo
+perfil_4 <- c(VC_CAS = "0", IND_BC = "0", RPXDCON = 0, IND_IF = "0")
+
+# Perfil 5: Sin deuda castigada, sin indicador BC, sin indicador IF y con relación de deuda de consumo de 0.8
+perfil_5 <- c(VC_CAS = "0", IND_BC = "0", RPXDCON = 0.8, IND_IF = "0")
+
+
+vars_modelo <- c("VC_CAS", "IND_BC", "RPXDCON", "IND_IF")
+
+newdata_perfiles <- do.call(rbind, lapply(
+  list(perfil_1, perfil_2, perfil_3, perfil_4, perfil_5),
+  function(x) unlist(x)[vars_modelo]
+)) |> as.data.frame()
+
+row.names(newdata_perfiles) <- paste0("perfil_", 1:5)
+
+# Asignar las descripciones resumidas a cada perfil
+newdata_perfiles$perfil <- c(
+  "Perfil 1: Con castigo, Sin BC, sin IF, relación deuda de consumo 0.",
+  "Perfil 2: Sin castigo, Sin BC, sin IF, relación deuda de consumo 0.5",
+  "Perfil 3: Con castigo, Con BC, con IF, relación deuda de consumo 1",
+  "Perfil 4: Sin castigo, Sin BC, sin IF, relación deuda de consumo 0.",
+  "Perfil 5: Sin castigo, Sin BC, sin IF, relación deuda de consumo 0.8"
+)
+
+
+# Alinear con lo usado en el modelo (por si hay otros factores):
+mf <- model.frame(modelo_seleccion)
+resp_name <- as.character(formula(modelo_seleccion)[[2]])
+x_names   <- setdiff(names(mf), resp_name)
+
+keep_cols <- union(intersect(names(newdata_perfiles), c(x_names, "perfil")), character(0))
+newdata_perfiles <- newdata_perfiles[, keep_cols, drop = FALSE]
+
+for (v in intersect(x_names, names(newdata_perfiles))) {
+  if (is.factor(mf[[v]])) {
+    newdata_perfiles[[v]] <- factor(newdata_perfiles[[v]], levels = levels(mf[[v]]))
+  } else if (is.numeric(mf[[v]])) {
+    newdata_perfiles[[v]] <- as.numeric(newdata_perfiles[[v]])
+  }
+}
+
+# ============== 3) Predicción con tu modelo_forward ==============
+thr <- 0.5
+p_malo <- predict(modelo_seleccion, newdata = newdata_perfiles, type = "response")
+clase  <- ifelse(p_malo >= thr, "MALO", "BUENO")
+
+res <- newdata_perfiles |>
+  transmute(
+    Perfil = perfil,
+    `Prob. MALO` = p_malo,
+    Clasificación = factor(clase, levels = c("BUENO","MALO"))
+  ) |>
+  arrange(desc(`Prob. MALO`))
+
+# ============== 4) Tabla ==============
+gt(res) |>
+  fmt_number(columns = "Prob. MALO", decimals = 4) |>
+  tab_header(
+    title = "Predicción de COMPORTAMIENTO con modelo_forward",
+    subtitle = paste0("Umbral = ", thr, " (Probabilidad de MALO)")
+  )
+
+
+```
+
+- Perfil 1. Con deuda castigada, sin indicador BC, sin indicador IF y sin relación de deuda de consumo.
+
+$$
+VC\_CAS = "1", IND\_BC = "0", RPXDCON = 0, IND\_IF = "0"
+$$
+
+47.56% de probabilidad de mal comportamiento crediticio. (Buen comportamiento crediticio)
+
+Este perfil representa a un cliente con deuda castigada, pero sin indicadores BC y IF, ademas sin deuda de consumo. Estos factores no son suficientes para que el modelo le asigne un mal comportamiento, y la probabilidad de mal comportamiento es de 47.56%. Al estar por encima del umbral de 0.5, el sistema lo clasifica correctamente como "BUENO". Este tipo de cliente suele ser aprobado, pero podría ser sujeto a un monitoreo más estricto.
+
+
+- Perfil 2.  Sin deuda castigada, sin indicador BC, sin indicador IF y con relación de deuda de consumo de 0.5.
+
+$$
+VC\_CAS = "0", IND\_BC = "0", RPXDCON = 0.5, IND\_IF = "0"
+$$
+
+39.71% de probabilidad de mal comportamiento crediticio. (Buen comportamiento crediticio)
+
+Este es un cliente sin deudas castigadas, y sin indicadores BC e IF, y registra una relación de 0.5 de deuda de consumo maxima, es un cliente de riesgo moderado a bajo. Aunque tiene un historial de pago limpio (VC\_CAS = "0"), la presencia de deuda de consumo eleva su perfil de riesgo. El modelo calcula su probabilidad de incumplimiento en 39.71%. Dado que este valor está por debajo del umbral de 0.5, el sistema lo clasifica como "BUENO".
+
+- Perfil 3. Con deuda castigada, con indicador BC, con indicador IF y con relación de deuda de consumo maxima (1).
+
+$$
+VC\_CAS = "1", IND\_BC = "1", RPXDCON = 1, IND\_IF = "1"
+$$
+
+97.66% de probabilidad de mal comportamiento crediticio. (Mal comportamiento crediticio)
+  
+Este es, inequívocamente, el perfil de mayor riesgo del grupo. Acumula todos los factores negativos: tiene un historial de deuda castigada (VC\_CAS = "1") y también el indicador BC e IF (IND\_BC = "1" y IND\_IF = "1"), además de una relación de deuda de consumo máxima (1). El modelo refleja esto asignándole la probabilidad más alta de incumplimiento, un 97.66%. Es un claro comportamiento "MALO" y representa el tipo de cliente que el modelo busca identificar y rechazar.
+
+- Perfil 4. Sin deuda castigada, sin indicador BC, sin indicador IF y sin relación de deuda de consumo.
+
+$$
+VC\_CAS = "0", IND\_BC = "0", RPXDCON = 0, IND\_IF = "0"
+$$
+
+24.68% de probabilidad de mal comportamiento crediticio. (Buen comportamiento crediticio)
+
+Este es el arquetipo del cliente "BUENO" y el perfil de más bajo riesgo. No tiene deudas de consumo vigentes, no tiene historial de deuda castigada, no tiene el indicador BC e IF. Como resultado, el modelo le asigna la probabilidad más baja de incumplimiento de todo el grupo, con solo un 24.68%. Su clasificación como "BUENO" es clara y representa un cliente seguro para la entidad.
+
+
+- Perfil 5.  Sin deuda castigada, sin indicador BC, sin indicador IF y con relación de deuda de consumo de 0.8.
+
+$$
+VC\_CAS = "0", IND\_BC = "0", RPXDCON = 0.8, IND\_IF = "0"
+$$
+
+50.03% de probabilidad de mal comportamiento crediticio. (Mal comportamiento crediticio)
+
+Este perfil representa a un cliente "en el límite" que no logra ser aprobado. Su principal característica es una alta carga de deuda de consumo (0.8), pero su factor más "sano" es un historial de pago limpio (VC\_CAS = "0"), sin indicadores BC e IF. Debido a que tiene una alta carga crediticia de consumo, su probabilidad de incumplimiento se mantiene en 50.03%, por encima del umbral de 0.5, resultando en una clasificación de "MALO".
+
+Si revisamos el modelo en concreto tenemos que:
+
+
+$$
+\log\left( \frac{P(\text{MALO})}{1 - P(\text{MALO})} \right)
+= -1.1155 + 1.018 \cdot \text{VC\_CAS}\_1 + 1.202\cdot \text{IND\_BC}\_1+1.3961\cdot \text{RPXDCON} + 1.233 \cdot \text{IND\_IF}\_1
+$$
+
+
+
+A modo general, la justificación de esas probabilidades se basa en el fuerte peso que el modelo le da a las variables VC\_CAS, IND\_BC, IND\_IF y RPXDCON, en comparación con el riesgo base.
+
+El modelo parte de un intercepto negativo (-1.1155), lo que significa que un cliente "perfecto" (con 0 en todas las variables, como el Perfil 2) tiene un riesgo base bajo.
+
+El modelo identifica los cuatro factores de riesgo como altos: VC\_CAS (1.018), IND\_BC (1.202), RPXDCON (1.3961) e IND\_IF (1.233). Los coeficientes son fuertemente positivos, aunque no tienen un peso tan grande para que cada uno por sí solo sea capaz de anular el intercepto negativo y empujar la probabilidad de clasificar un cliente como "MALO". 
+
+Teniendo lo anterior en cuenta, al no tener deuda vencida o castiga y no tener un indicador BC las probabilidades de clasificarse como un comportamiento "MALO" son menores, aun que, revisando el caso del perfil 5 (Sin castigo, Sin BC, sin IF, relación deuda de consumo 0.8) con una probabilidad de comportamiento "MALO" del 50.03, nos podemos dar cuenta de apesar de no tener estos castigos en la deuda y no tener indicador BC e IF, aun así, es posible clasificarse como un comportamiento "MALO", donde, si disminuimos esa relación de crédito de consumo, se clasificaría como "BUENO".
+
+# **Librerias utilizadas**
+
+| paquete | función | utilización |
+|:-----------------------|:-----------------------|:-----------------------|
+| **knitr** | `opts_chunk$set` | Se usa en el bloque de configuración inicial para establecer opciones globales que afectan a todos los chunks de código R del documento, como ocultar mensajes y advertencias. |
+| **readxl** | `read_excel` | Para importar los datos desde un archivo de Microsoft Excel (.xlsx) y cargarlos en un data frame de R llamado `scoring`. |
+| **dplyr** | `select` | Para seleccionar o eliminar columnas. Se usa para crear subconjuntos de datos (ej. solo numéricas) y para eliminar la variable `GSE` del análisis final. |
+|  | `mutate` | Para crear y modificar columnas. Fundamental para la ingeniería de características, como la creación del grupo `etario` o la estandarización de variables. |
+|  | `filter` | Para filtrar filas del data frame según una o más condiciones, principalmente para eliminar observaciones con valores `NA` antes de modelar. |
+|  | `case_when` | Para aplicar una lógica condicional compleja, utilizada dentro de `mutate` para asignar el grupo `etario` según el valor de `EDAD`. |
+|  | `arrange` | Para ordenar las filas de un data frame, por ejemplo, para presentar los resultados de los outliers del más al menos frecuente. |
+|  | `summarise` | Para calcular estadísticas resumen de los datos, como la media y desviación estándar, necesarias para la estandarización manual de variables. |
+|  | `count` | Para contar la frecuencia de las categorías en una variable, usado en los gráficos de barras bivariados. |
+|  | `group_by` | Para agrupar el data frame por una o más variables antes de aplicar otras operaciones, como `summarise`. |
+|  | `across` | Para aplicar una misma función a múltiples columnas a la vez (ej. `droplevels` a todas las columnas de tipo factor). |
+|  | `%>%` | El operador "pipe", que permite encadenar múltiples operaciones de forma secuencial y legible, mejorando la claridad del código. |
+| **purrr** | `imap_dfr` | Para iterar sobre las columnas de un data frame y sus nombres simultáneamente, construyendo una tabla resumen de outliers. |
+|  | `map_dfr` | Para aplicar una función a cada elemento de una lista (los pares de variables) y combinar los resultados en un único data frame para los gráficos de dispersión. |
+| **tidyr** | `drop_na` | Para eliminar filas que contienen valores `NA` en columnas específicas, asegurando que los gráficos y modelos se ejecuten sin errores. |
+| **plotly** | `plot_ly` | Función principal para crear gráficos interactivos como boxplots, gráficos de barras, de dispersión y circulares (pie charts). |
+|  | `layout` | Para personalizar la apariencia de los gráficos `plotly`, como títulos, ejes y, muy importantemente, los menús desplegables (`updatemenus`). |
+|  | `subplot` | Para combinar múltiples gráficos `plotly` en una sola visualización, como en el caso del boxplot junto al gráfico de densidad. |
+| **nnet** | `multinom` | Para ajustar un modelo de regresión logística multinomial, utilizado para intentar predecir la variable `GSE` a partir de otras predictoras. |
+| **caret** | `createDataPartition` | Para dividir los datos en conjuntos de entrenamiento y prueba de manera estratificada, asegurando que la proporción de la variable objetivo se mantenga en ambas muestras. |
+|  | `trainControl` | Para configurar los parámetros del proceso de entrenamiento del modelo, como el método de validación cruzada (`cv`). |
+|  | `train` | Para entrenar y optimizar modelos de machine learning. Se usa para encontrar el valor `k` óptimo en el modelo k-NN mediante validación cruzada. |
+|  | `confusionMatrix` | Para evaluar el rendimiento de los modelos de clasificación, generando una matriz de confusión y calculando métricas como Accuracy, Sensibilidad y Especificidad. |
+| **ggplot2** | `ggplot`, `aes` | Para iniciar la construcción de un gráfico y mapear variables a elementos estéticos (ejes, color, etc.). Es la base de los gráficos estáticos del análisis bivariado. |
+|  | `geom_point`, `geom_tile`, `geom_boxplot` | Geometrías usadas para crear gráficos de dispersión, mapas de calor (heatmap de correlación) y diagramas de caja (boxplots). |
+|  | `facet_wrap` | Para crear una matriz de gráficos (facetas), donde cada panel muestra un subconjunto de los datos, como en la visualización de todos los pares de variables numéricas. |
+|  | `labs`, `theme_minimal`, `theme` | Para personalizar las etiquetas, títulos y el aspecto general de los gráficos `ggplot2`, mejorando su legibilidad y estética. |
+|  | `scale_fill_gradient2` | Para crear una escala de color divergente, ideal para el mapa de calor de correlaciones, donde los valores van de -1 a 1. |
+|  | `coord_flip` | Para intercambiar los ejes X e Y, útil para crear boxplots horizontales que son más fáciles de leer con muchas categorías. |
+| **forcats** | `fct_lump_n` | Para agrupar los niveles menos frecuentes de una variable categórica en una sola categoría ("Otros"), simplificando las visualizaciones. |
+|  | `fct_explicit_na` | Para convertir los valores `NA` de un factor en un nivel explícito, permitiendo su visualización en gráficos y tablas. |
+| **patchwork** | `+`, `plot_layout`, `wrap_elements` | Para combinar múltiples gráficos `ggplot2` y otros objetos gráficos (como tablas) en una sola composición visual con un diseño personalizado. |
+| **gridExtra** | `tableGrob`, `ttheme_minimal` | Para crear un objeto gráfico de tabla a partir de un data frame, que luego se integra junto a un gráfico `ggplot2` usando `patchwork`. |
+| **broom** | `tidy` | Para convertir la salida de un modelo estadístico (como `glm`) en un data frame "ordenado", facilitando la visualización y el análisis de los coeficientes y p-valores. |
+| **pROC** | `roc`, `auc`, `coords` | Para calcular y analizar la curva ROC (Receiver Operating Characteristic) de los modelos, obtener el AUC (Área Bajo la Curva) y encontrar el punto de corte óptimo. |
+| **gt** | `gt`, `fmt_number`, `tab_header` | Para crear tablas de presentación de alta calidad. Se utiliza para mostrar de forma clara y profesional las predicciones de los perfiles de clientes. |
+
+# **Referencias**
+
+Parveen, K. R., & Thangaraju, P. (2024). Enhanced credit scoring prediction using KNN-Z-Score based logistic regression (KZ-LR) algorithm. Journal of Electrical Systems, 20(3), 7230–7237.
+
+AIM Chile. (2024). Actualización y Manual de Aplicación – GSE AIM 2023. Asociación de Investigadores de Mercado y Opinión Pública de Chile. <https://aimchile.cl/wp-content/uploads/2025/06/Actualizacion-y-Manual-GSE-AIM-2023.pdf>
+
+
+
+GfK Chile. (2019). Los nuevos GSE [Documento informativo]. GfK Chile. <https://cdn2.hubspot.net/hubfs/2405078/cms-pdfs/fileadmin/user_upload/country_one_pager/cl/gfk_gse_190502_final.pdf>
+
+Rodríguez, P., Valenzuela, J. P., Truffello, R., Ulloa, J., Matas, M., Quintana, D., Hernández, C., Muñoz, C., & Requena, B. (2019). Un modelo de identificación de requerimientos de nueva infraestructura pública en educación básica (Informe final FONIDE). Centro de Estudios, Ministerio de Educación (Chile). <https://centroestudios.mineduc.cl/wp-content/uploads/sites/100/2021/08/061-Rodriguez-FINAL.pdf>
+
+Agresti, A. (2019). An Introduction to Categorical Data Analysis (3rd ed.). Wiley.
+
+Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.). Lawrence Erlbaum Associates.
+
+Conover, W. J. (1999). Practical Nonparametric Statistics (3rd ed.). Wiley.
+
+Cramér, H. (1946). Mathematical Methods of Statistics. Princeton University Press.
+
+Field, A. (2013). Discovering Statistics Using IBM SPSS Statistics (4th ed.). SAGE Publications.
+
+Olejnik, S., & Algina, J. (2003). Generalized eta and omega squared statistics: Measures of effect size for some common research designs. Psychological Methods, 8(4), 434–447.
